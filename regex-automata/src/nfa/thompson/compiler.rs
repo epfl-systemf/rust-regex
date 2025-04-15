@@ -1001,12 +1001,14 @@ impl Compiler {
                 StateID::ZERO
             };
             if has_lookarounds {
+                self.builder.borrow_mut().enter_look_behind();
                 let lookaround_prefix =
                     self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
                 let lookaround_alt = self.add_union()?;
                 self.patch(lookaround_prefix.end, lookaround_alt)?;
                 self.patch(top_level_alt, lookaround_prefix.start)?;
                 self.lookaround_alt.borrow_mut().replace(lookaround_alt);
+                self.builder.borrow_mut().exit_look_behind();
             }
             let one = self.c_cap(0, None, e.borrow())?;
             let match_state_id = self.add_match()?;
@@ -1052,6 +1054,7 @@ impl Compiler {
         &self,
         lookaround: &LookAround,
     ) -> Result<ThompsonRef, BuildError> {
+        self.builder.borrow_mut().enter_look_behind();
         let sub = self.c(lookaround.sub())?;
         let pos = match lookaround {
             LookAround::NegativeLookBehind(_) => false,
@@ -1062,7 +1065,6 @@ impl Compiler {
             .map_err(|e| {
                 BuildError::too_many_lookarounds(e.attempted() as usize)
             })?;
-        let check = self.add_check_lookaround(idx, pos)?;
         let write = self.add_write_lookaround(idx)?;
         self.patch(sub.end, write)?;
         self.patch(
@@ -1071,6 +1073,8 @@ impl Compiler {
                 .expect("Cannot compile look-around outside pattern"),
             sub.start,
         )?;
+        self.builder.borrow_mut().exit_look_behind();
+        let check = self.add_check_lookaround(idx, pos)?;
         Ok(ThompsonRef { start: check, end: check })
     }
 
@@ -2169,12 +2173,12 @@ mod tests {
             &[
                 s_bin_union(2, 1),
                 s_range(0, 255, 0),
-                s_bin_union(3, 6),
+                s_bin_union(3, 7),
                 s_bin_union(5, 4),
                 s_range(0, 255, 3),
-                s_look(Look::Start, 7),
-                s_check_lookaround(0, true, 8),
+                s_look(Look::Start, 6),
                 s_write_lookaround(0),
+                s_check_lookaround(0, true, 8),
                 s_byte(b'a', 9),
                 s_match(0)
             ]
@@ -2310,28 +2314,28 @@ mod tests {
         assert_eq!(
             build(r"(?<=a)").states(),
             &[
-                s_bin_union(1, 4),
+                s_bin_union(1, 5),
                 s_bin_union(3, 2),
                 s_range(b'\x00', b'\xFF', 1),
-                s_byte(b'a', 5),
-                s_check_lookaround(0, true, 6),
+                s_byte(b'a', 4),
                 s_write_lookaround(0),
+                s_check_lookaround(0, true, 6),
                 s_match(0)
             ]
         );
         assert_eq!(
             build(r"(?<=a(?<!b))").states(),
             &[
-                s_bin_union(1, 8),
+                s_bin_union(1, 9),
                 s_bin_union(3, 2),
                 s_range(b'\x00', b'\xFF', 1),
                 s_bin_union(5, 4),
-                s_byte(b'a', 6),
-                s_byte(b'b', 7),
-                s_check_lookaround(0, false, 9),
+                s_byte(b'a', 7),
+                s_byte(b'b', 6),
                 s_write_lookaround(0),
-                s_check_lookaround(1, true, 10),
+                s_check_lookaround(0, false, 8),
                 s_write_lookaround(1),
+                s_check_lookaround(1, true, 10),
                 s_match(0)
             ]
         );

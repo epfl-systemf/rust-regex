@@ -1280,7 +1280,11 @@ impl PikeVM {
         while at <= input.end() {
             // If we have no states left to visit, then there are some cases
             // where we know we can quit early or even skip ahead.
-            if curr.set.is_empty() {
+            // If there are only states active from look-behind expressions,
+            // then we can treat the current state set as being empty
+            if curr.set.is_empty()
+            //|| !self.nfa.any_non_look_behind_state(&curr.set)
+            {
                 // We have a match and we haven't been instructed to continue
                 // on even after finding a match, so we can quit.
                 if hm.is_some() && !allmatches {
@@ -2036,6 +2040,7 @@ impl Cache {
     pub fn reset(&mut self, re: &PikeVM) {
         self.curr.reset(re);
         self.next.reset(re);
+        self.lookaround = vec![None; re.lookaround_count()];
     }
 
     /// Returns the heap memory usage, in bytes, of this cache.
@@ -2063,6 +2068,7 @@ impl Cache {
         self.stack.clear();
         self.curr.setup_search(captures_slot_len);
         self.next.setup_search(captures_slot_len);
+        self.lookaround = vec![None; self.lookaround.len()];
     }
 }
 

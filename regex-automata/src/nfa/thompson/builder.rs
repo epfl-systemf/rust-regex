@@ -363,6 +363,10 @@ pub struct Builder {
     reverse: bool,
     /// The matcher to use for look-around assertions.
     look_matcher: LookMatcher,
+    /// How many levels of look-behind expressions we're currently nested in
+    look_behind_depth: usize,
+    /// States that are used in look-behind expressions
+    look_behind_states: Vec<StateID>,
     /// A size limit to respect when building an NFA. If the total heap memory
     /// of the intermediate NFA states exceeds (or would exceed) this amount,
     /// then an error is returned.
@@ -456,6 +460,7 @@ impl Builder {
         // set of states will be smaller because of partial epsilon removal,
         // so the state IDs will not be the same.
         for (sid, state) in self.states.iter().with_state_ids() {
+            let belongs_to_lb = self.look_behind_states.contains(&sid);
             match *state {
                 State::Empty { next } => {
                     // Since we're removing empty states, we need to handle
@@ -464,39 +469,47 @@ impl Builder {
                     empties.push((sid, next));
                 }
                 State::ByteRange { trans } => {
-                    remap[sid] = nfa.add(nfa::State::ByteRange { trans });
+                    remap[sid] = nfa
+                        .add(nfa::State::ByteRange { trans }, belongs_to_lb);
                 }
                 State::Sparse { ref transitions } => {
                     remap[sid] = match transitions.len() {
-                        0 => nfa.add(nfa::State::Fail),
-                        1 => nfa.add(nfa::State::ByteRange {
-                            trans: transitions[0],
-                        }),
+                        0 => nfa.add(nfa::State::Fail, belongs_to_lb),
+                        1 => nfa.add(
+                            nfa::State::ByteRange { trans: transitions[0] },
+                            belongs_to_lb,
+                        ),
                         _ => {
                             let transitions =
                                 transitions.to_vec().into_boxed_slice();
                             let sparse = SparseTransitions { transitions };
-                            nfa.add(nfa::State::Sparse(sparse))
+                            nfa.add(nfa::State::Sparse(sparse), belongs_to_lb)
                         }
                     }
                 }
                 State::Look { look, next } => {
-                    remap[sid] = nfa.add(nfa::State::Look { look, next });
+                    remap[sid] = nfa
+                        .add(nfa::State::Look { look, next }, belongs_to_lb);
                 }
                 State::WriteLookAround { lookaround_index } => {
-                    remap[sid] = nfa
-                        .add(nfa::State::WriteLookAround { lookaround_index });
+                    remap[sid] = nfa.add(
+                        nfa::State::WriteLookAround { lookaround_index },
+                        belongs_to_lb,
+                    );
                 }
                 State::CheckLookAround {
                     lookaround_index,
                     positive,
                     next,
                 } => {
-                    remap[sid] = nfa.add(nfa::State::CheckLookAround {
-                        lookaround_index,
-                        positive,
-                        next,
-                    });
+                    remap[sid] = nfa.add(
+                        nfa::State::CheckLookAround {
+                            lookaround_index,
+                            positive,
+                            next,
+                        },
+                        belongs_to_lb,
+                    );
                 }
                 State::CaptureStart { pattern_id, group_index, next } => {
                     // We can't remove this empty state because of the side
@@ -507,12 +520,15 @@ impl Builder {
                         .expect("invalid capture index");
                     let slot =
                         SmallIndex::new(slot).expect("a small enough slot");
-                    remap[sid] = nfa.add(nfa::State::Capture {
-                        next,
-                        pattern_id,
-                        group_index,
-                        slot,
-                    });
+                    remap[sid] = nfa.add(
+                        nfa::State::Capture {
+                            next,
+                            pattern_id,
+                            group_index,
+                            slot,
+                        },
+                        belongs_to_lb,
+                    );
                 }
                 State::CaptureEnd { pattern_id, group_index, next } => {
                     // We can't remove this empty state because of the side
@@ -528,53 +544,69 @@ impl Builder {
                         .unwrap();
                     let slot =
                         SmallIndex::new(slot).expect("a small enough slot");
-                    remap[sid] = nfa.add(nfa::State::Capture {
-                        next,
-                        pattern_id,
-                        group_index,
-                        slot,
-                    });
+                    remap[sid] = nfa.add(
+                        nfa::State::Capture {
+                            next,
+                            pattern_id,
+                            group_index,
+                            slot,
+                        },
+                        belongs_to_lb,
+                    );
                 }
                 State::Union { ref alternates } => {
                     if alternates.is_empty() {
-                        remap[sid] = nfa.add(nfa::State::Fail);
+                        remap[sid] = nfa.add(nfa::State::Fail, belongs_to_lb);
                     } else if alternates.len() == 1 {
                         empties.push((sid, alternates[0]));
                         remap[sid] = alternates[0];
                     } else if alternates.len() == 2 {
-                        remap[sid] = nfa.add(nfa::State::BinaryUnion {
-                            alt1: alternates[0],
-                            alt2: alternates[1],
-                        });
+                        remap[sid] = nfa.add(
+                            nfa::State::BinaryUnion {
+                                alt1: alternates[0],
+                                alt2: alternates[1],
+                            },
+                            belongs_to_lb,
+                        );
                     } else {
                         let alternates =
                             alternates.to_vec().into_boxed_slice();
-                        remap[sid] = nfa.add(nfa::State::Union { alternates });
+                        remap[sid] = nfa.add(
+                            nfa::State::Union { alternates },
+                            belongs_to_lb,
+                        );
                     }
                 }
                 State::UnionReverse { ref alternates } => {
                     if alternates.is_empty() {
-                        remap[sid] = nfa.add(nfa::State::Fail);
+                        remap[sid] = nfa.add(nfa::State::Fail, belongs_to_lb);
                     } else if alternates.len() == 1 {
                         empties.push((sid, alternates[0]));
                         remap[sid] = alternates[0];
                     } else if alternates.len() == 2 {
-                        remap[sid] = nfa.add(nfa::State::BinaryUnion {
-                            alt1: alternates[1],
-                            alt2: alternates[0],
-                        });
+                        remap[sid] = nfa.add(
+                            nfa::State::BinaryUnion {
+                                alt1: alternates[1],
+                                alt2: alternates[0],
+                            },
+                            belongs_to_lb,
+                        );
                     } else {
                         let mut alternates =
                             alternates.to_vec().into_boxed_slice();
                         alternates.reverse();
-                        remap[sid] = nfa.add(nfa::State::Union { alternates });
+                        remap[sid] = nfa.add(
+                            nfa::State::Union { alternates },
+                            belongs_to_lb,
+                        );
                     }
                 }
                 State::Fail => {
-                    remap[sid] = nfa.add(nfa::State::Fail);
+                    remap[sid] = nfa.add(nfa::State::Fail, belongs_to_lb);
                 }
                 State::Match { pattern_id } => {
-                    remap[sid] = nfa.add(nfa::State::Match { pattern_id });
+                    remap[sid] = nfa
+                        .add(nfa::State::Match { pattern_id }, belongs_to_lb);
                 }
             }
         }
@@ -1169,7 +1201,26 @@ impl Builder {
         self.memory_states += state.memory_usage();
         self.states.push(state);
         self.check_size_limit()?;
+        if self.look_behind_depth > 0 {
+            self.look_behind_states.push(id);
+        }
         Ok(id)
+    }
+
+    /// Increase the look-behind nesting level
+    ///
+    /// This function must be called before adding states that belong to
+    /// a look-behind sub-expression
+    pub fn enter_look_behind(&mut self) {
+        self.look_behind_depth += 1;
+    }
+
+    /// Decrease the look-behind nesting level
+    ///
+    /// This function must be called after all states that belong to
+    /// a look-behind sub-expression have been added
+    pub fn exit_look_behind(&mut self) {
+        self.look_behind_depth -= 1;
     }
 
     /// Add a transition from one state to another.

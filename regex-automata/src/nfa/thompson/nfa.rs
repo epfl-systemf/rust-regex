@@ -1106,6 +1106,15 @@ impl NFA {
         self.0.lookaround_count
     }
 
+    /// Returns true iff there is at least one state in [`states`] that does
+    /// not belong to any look-behind expression
+    pub(crate) fn any_non_look_behind_state(
+        &self,
+        states: &SparseSet,
+    ) -> bool {
+        states.iter().any(|sid| !self.0.lookaround_states[sid.as_usize()])
+    }
+
     // FIXME: The `look_set_prefix_all` computation was not correct, and it
     // seemed a little tricky to fix it. Since I wasn't actually using it for
     // anything, I just decided to remove it in the run up to the regex 1.9
@@ -1270,6 +1279,8 @@ pub(super) struct Inner {
     /// This is needed to initialize the table for storing the result of
     /// look-around evaluation.
     lookaround_count: usize,
+    /// The set of states that are only used to check look-behind expressions.
+    lookaround_states: Vec<bool>,
     /// Heap memory used indirectly by NFA states and other things (like the
     /// various capturing group representations above). Since each state
     /// might use a different amount of heap, we need to keep track of this
@@ -1366,7 +1377,11 @@ impl Inner {
     /// This panics if too many states are added such that a fresh identifier
     /// could not be created. (Currently, the only caller of this routine is
     /// a `Builder`, and it upholds this invariant.)
-    pub(super) fn add(&mut self, state: State) -> StateID {
+    pub(super) fn add(
+        &mut self,
+        state: State,
+        belongs_to_lb: bool,
+    ) -> StateID {
         match state {
             State::ByteRange { ref trans } => {
                 self.byte_class_set.set_range(trans.start, trans.end);
@@ -1399,6 +1414,7 @@ impl Inner {
         let id = StateID::new(self.states.len()).unwrap();
         self.memory_extra += state.memory_usage();
         self.states.push(state);
+        self.lookaround_states.push(belongs_to_lb);
         id
     }
 
@@ -1486,7 +1502,14 @@ impl fmt::Debug for Inner {
             } else {
                 ' '
             };
-            writeln!(f, "{}{:06?}: {:?}", status, sid.as_usize(), state)?;
+            writeln!(
+                f,
+                "{}{:06?}: {:?} {}",
+                status,
+                sid.as_usize(),
+                state,
+                if self.lookaround_states[sid.as_usize()] { "lb" } else { "" }
+            )?;
         }
         let pattern_len = self.start_pattern.len();
         if pattern_len > 1 {
