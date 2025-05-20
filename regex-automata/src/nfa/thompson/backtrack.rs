@@ -301,9 +301,6 @@ impl Builder {
         nfa: NFA,
     ) -> Result<BoundedBacktracker, BuildError> {
         nfa.look_set_any().available().map_err(BuildError::word)?;
-        if nfa.lookaround_count() > 0 {
-            return Err(BuildError::unsupported_lookarounds());
-        }
         Ok(BoundedBacktracker { config: self.config.clone(), nfa })
     }
 
