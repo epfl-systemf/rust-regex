@@ -340,8 +340,10 @@ pub struct Builder {
     /// contains a single regex, then `start_pattern[0]` and `start_anchored`
     /// are always equivalent.
     start_pattern: Vec<StateID>,
-    /// The starting states for each individual look-behind sub-expression.
+    /// The starting state for each individual look-behind sub-expression.
     start_look_behind: Vec<StateID>,
+    /// The starting state for each reversed look-behind sub-expression.
+    start_look_behind_reverse: Vec<StateID>,
     /// A map from pattern ID to capture group index to name. (If no name
     /// exists, then a None entry is present. Thus, all capturing groups are
     /// present in this mapping.)
@@ -453,6 +455,9 @@ impl Builder {
 
         nfa.set_starts(start_anchored, start_unanchored, &self.start_pattern);
         nfa.set_look_behind_starts(self.start_look_behind.as_slice());
+        nfa.set_look_behind_rev_starts(
+            self.start_look_behind_reverse.as_slice(),
+        );
         nfa.set_captures(&self.captures).map_err(BuildError::captures)?;
         // The idea here is to convert our intermediate states to their final
         // form. The only real complexity here is the process of converting
@@ -714,6 +719,15 @@ impl Builder {
     /// running look-behind expressions.
     pub fn start_look_behind(&mut self, start_id: StateID) {
         self.start_look_behind.push(start_id);
+    }
+
+    /// Adds the `start_id` to the set of starting states that is used when
+    /// running reversed look-behind expressions.
+    ///
+    /// Look-behind expressions are searched in reverse when the backtracking
+    /// engine is used.
+    pub fn start_look_behind_reverse(&mut self, start_id: StateID) {
+        self.start_look_behind_reverse.push(start_id);
     }
 
     /// Add an "empty" NFA state.

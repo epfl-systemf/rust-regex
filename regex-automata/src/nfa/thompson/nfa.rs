@@ -1186,6 +1186,7 @@ impl NFA {
             + self.0.start_pattern.len() * size_of::<StateID>()
             + self.0.group_info.memory_usage()
             + self.0.start_look_behind.len() * size_of::<StateID>()
+            + self.0.start_look_behind_reverse.len() * size_of::<StateID>()
             + self.0.memory_extra
     }
 }
@@ -1279,6 +1280,8 @@ pub(super) struct Inner {
     lookaround_count: usize,
     /// Contains the start state for each of the look-behind subexpressions.
     start_look_behind: Vec<StateID>,
+    /// Contains the start state for each reversed look-behind subexpression.
+    start_look_behind_reverse: Vec<StateID>,
     /// Heap memory used indirectly by NFA states and other things (like the
     /// various capturing group representations above). Since each state
     /// might use a different amount of heap, we need to keep track of this
@@ -1433,6 +1436,13 @@ impl Inner {
         look_behind_starts: &[StateID],
     ) {
         self.start_look_behind = look_behind_starts.to_vec();
+    }
+
+    pub(super) fn set_look_behind_rev_starts(
+        &mut self,
+        look_behind_rev_starts: &[StateID],
+    ) {
+        self.start_look_behind_reverse = look_behind_rev_starts.to_vec();
     }
 
     /// Sets the UTF-8 mode of this NFA.

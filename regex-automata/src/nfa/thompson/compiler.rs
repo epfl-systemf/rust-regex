@@ -698,7 +698,7 @@ pub struct Compiler {
     /// string.
     parser: ParserBuilder,
     /// The compiler configuration.
-    config: Config,
+    config: RefCell<Config>,
     /// The builder for actually constructing an NFA. This provides a
     /// convenient abstraction for writing a compiler.
     builder: RefCell<Builder>,
@@ -720,7 +720,7 @@ impl Compiler {
     pub fn new() -> Compiler {
         Compiler {
             parser: ParserBuilder::new(),
-            config: Config::default(),
+            config: RefCell::new(Config::default()),
             builder: RefCell::new(Builder::new()),
             utf8_state: RefCell::new(Utf8State::new()),
             trie_state: RefCell::new(RangeTrie::new()),
@@ -898,7 +898,7 @@ impl Compiler {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn configure(&mut self, config: Config) -> &mut Compiler {
-        self.config = self.config.overwrite(config);
+        self.config.replace_with(|old_cfg| old_cfg.overwrite(config));
         self
     }
 
@@ -943,12 +943,10 @@ impl Compiler {
         if exprs.len() > PatternID::LIMIT {
             return Err(BuildError::too_many_patterns(exprs.len()));
         }
-        if self.config.get_reverse()
-            && self.config.get_which_captures().is_any()
-        {
+        if self.is_reverse() && self.get_which_captures().is_any() {
             return Err(BuildError::unsupported_captures());
         }
-        if self.config.get_reverse()
+        if self.is_reverse()
             && exprs.iter().any(|e| {
                 (e.borrow() as &Hir).properties().contains_lookaround_expr()
             })
@@ -957,14 +955,10 @@ impl Compiler {
         }
 
         self.builder.borrow_mut().clear();
-        self.builder.borrow_mut().set_utf8(self.config.get_utf8());
-        self.builder.borrow_mut().set_reverse(self.config.get_reverse());
-        self.builder
-            .borrow_mut()
-            .set_look_matcher(self.config.get_look_matcher());
-        self.builder
-            .borrow_mut()
-            .set_size_limit(self.config.get_nfa_size_limit())?;
+        self.builder.borrow_mut().set_utf8(self.get_utf8());
+        self.builder.borrow_mut().set_reverse(self.is_reverse());
+        self.builder.borrow_mut().set_look_matcher(self.get_look_matcher());
+        self.builder.borrow_mut().set_size_limit(self.get_nfa_size_limit())?;
         *self.lookaround_index.borrow_mut() = SmallIndex::ZERO;
 
         // We always add an unanchored prefix unless we were specifically told
@@ -973,13 +967,13 @@ impl Compiler {
         // NFA's anchored and unanchored start states are equivalent.
         let all_anchored = exprs.iter().all(|e| {
             let props = e.borrow().properties();
-            if self.config.get_reverse() {
+            if self.is_reverse() {
                 props.look_set_suffix().contains(hir::Look::End)
             } else {
                 props.look_set_prefix().contains(hir::Look::Start)
             }
         });
-        let anchored = !self.config.get_unanchored_prefix() || all_anchored;
+        let anchored = !self.get_unanchored_prefix() || all_anchored;
         let unanchored_prefix = if anchored {
             self.c_empty()?
         } else {
@@ -1037,14 +1031,27 @@ impl Compiler {
         };
         let check = self.add_check_lookaround(idx, pos)?;
 
-        let unanchored =
-            self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
-        self.builder.borrow_mut().start_look_behind(unanchored.start);
+        if !self.is_reverse() {
+            let unanchored =
+                self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
+            self.builder.borrow_mut().start_look_behind(unanchored.start);
 
-        let sub = self.c(lookaround.sub())?;
-        let write = self.add_write_lookaround(idx)?;
-        self.patch(unanchored.end, sub.start)?;
-        self.patch(sub.end, write)?;
+            let look_idx_before_sub = *self.lookaround_index.borrow();
+            let sub = self.c(lookaround.sub())?;
+            let write = self.add_write_lookaround(idx)?;
+            self.patch(unanchored.end, sub.start)?;
+            self.patch(sub.end, write)?;
+
+            let backup_idx = *self.lookaround_index.borrow();
+            *self.lookaround_index.borrow_mut() = look_idx_before_sub;
+            self.set_reverse(true);
+            let sub_rev = self.c(lookaround.sub())?;
+            let write_rev = self.add_write_lookaround(idx)?;
+            self.patch(sub_rev.end, write_rev)?;
+            self.builder.borrow_mut().start_look_behind_reverse(sub_rev.start);
+            self.set_reverse(false);
+            *self.lookaround_index.borrow_mut() = backup_idx;
+        }
         Ok(ThompsonRef { start: check, end: check })
     }
 
@@ -1160,7 +1167,7 @@ impl Compiler {
         name: Option<&str>,
         expr: &Hir,
     ) -> Result<ThompsonRef, BuildError> {
-        match self.config.get_which_captures() {
+        match self.get_which_captures() {
             // No capture states means we always skip them.
             WhichCaptures::None => return self.c(expr),
             // Implicit captures states means we only add when index==0 since
@@ -1430,7 +1437,7 @@ impl Compiler {
             }
             Ok(ThompsonRef { start: self.add_sparse(trans)?, end })
         } else if self.is_reverse() {
-            if !self.config.get_shrink() {
+            if !self.get_shrink() {
                 // When we don't want to spend the extra time shrinking, we
                 // compile the UTF-8 automaton in reverse using something like
                 // the "naive" approach, but will attempt to re-use common
@@ -1746,7 +1753,38 @@ impl Compiler {
     }
 
     fn is_reverse(&self) -> bool {
-        self.config.get_reverse()
+        self.config.borrow().get_reverse()
+    }
+
+    fn set_reverse(&self, rev: bool) {
+        self.config.replace_with(|old_cfg| {
+            old_cfg
+                .overwrite(Config { reverse: Some(rev), ..Default::default() })
+        });
+    }
+
+    fn get_which_captures(&self) -> WhichCaptures {
+        self.config.borrow().get_which_captures()
+    }
+
+    fn get_shrink(&self) -> bool {
+        self.config.borrow().get_shrink()
+    }
+
+    fn get_unanchored_prefix(&self) -> bool {
+        self.config.borrow().get_unanchored_prefix()
+    }
+
+    fn get_nfa_size_limit(&self) -> Option<usize> {
+        self.config.borrow().get_nfa_size_limit()
+    }
+
+    fn get_look_matcher(&self) -> LookMatcher {
+        self.config.borrow().get_look_matcher()
+    }
+
+    fn get_utf8(&self) -> bool {
+        self.config.borrow().get_utf8()
     }
 }
 
@@ -2143,12 +2181,14 @@ mod tests {
             &[
                 s_bin_union(2, 1),
                 s_range(0, 255, 0),
-                s_check_lookaround(0, true, 7),
+                s_check_lookaround(0, true, 9),
                 s_bin_union(5, 4),
                 s_range(0, 255, 3),
                 s_look(Look::Start, 6),
                 s_write_lookaround(0),
-                s_byte(b'a', 8),
+                s_look(Look::End, 8),
+                s_write_lookaround(0),
+                s_byte(b'a', 10),
                 s_match(0)
             ]
         );
@@ -2283,10 +2323,12 @@ mod tests {
         assert_eq!(
             build(r"(?<=a)").states(),
             &[
-                s_check_lookaround(0, true, 5),
+                s_check_lookaround(0, true, 7),
                 s_bin_union(3, 2),
                 s_range(b'\x00', b'\xFF', 1),
                 s_byte(b'a', 4),
+                s_write_lookaround(0),
+                s_byte(b'a', 6),
                 s_write_lookaround(0),
                 s_match(0)
             ]
@@ -2294,15 +2336,20 @@ mod tests {
         assert_eq!(
             build(r"(?<=a(?<!b))").states(),
             &[
-                s_check_lookaround(0, true, 10),
+                s_check_lookaround(0, true, 15),
                 s_bin_union(3, 2),
                 s_range(b'\x00', b'\xFF', 1),
                 s_byte(b'a', 4),
-                s_check_lookaround(1, false, 9),
+                s_check_lookaround(1, false, 11),
                 s_bin_union(7, 6),
                 s_range(b'\x00', b'\xFF', 5),
                 s_byte(b'b', 8),
                 s_write_lookaround(1),
+                s_byte(b'b', 10),
+                s_write_lookaround(1),
+                s_write_lookaround(0),
+                s_check_lookaround(1, false, 13),
+                s_byte(b'a', 14),
                 s_write_lookaround(0),
                 s_match(0)
             ]
