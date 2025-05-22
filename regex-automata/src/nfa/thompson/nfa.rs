@@ -1112,6 +1112,13 @@ impl NFA {
         &self.0.start_look_behind
     }
 
+    /// Returns the length (in bytes) of the longest string matched by any
+    /// look-behind sub-expression. If `None`, the length is unbounded.
+    #[inline]
+    pub fn maximum_look_behind_len(&self) -> Option<usize> {
+        self.0.maximum_look_behind_len
+    }
+
     // FIXME: The `look_set_prefix_all` computation was not correct, and it
     // seemed a little tricky to fix it. Since I wasn't actually using it for
     // anything, I just decided to remove it in the run up to the regex 1.9
@@ -1279,6 +1286,9 @@ pub(super) struct Inner {
     lookaround_count: usize,
     /// Contains the start state for each of the look-behind subexpressions.
     start_look_behind: Vec<StateID>,
+    /// The length (in bytes) of the longest string matched by any
+    /// look-behind sub-expression. If `None`, the length is unbounded.
+    maximum_look_behind_len: Option<usize>,
     /// Heap memory used indirectly by NFA states and other things (like the
     /// various capturing group representations above). Since each state
     /// might use a different amount of heap, we need to keep track of this
@@ -1433,6 +1443,13 @@ impl Inner {
         look_behind_starts: &[StateID],
     ) {
         self.start_look_behind = look_behind_starts.to_vec();
+    }
+
+    pub(super) fn set_maximum_look_behind_len(
+        &mut self,
+        maximum_look_behind_len: Option<usize>,
+    ) {
+        self.maximum_look_behind_len = maximum_look_behind_len;
     }
 
     /// Sets the UTF-8 mode of this NFA.

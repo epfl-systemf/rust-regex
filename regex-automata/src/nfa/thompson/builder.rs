@@ -342,6 +342,9 @@ pub struct Builder {
     start_pattern: Vec<StateID>,
     /// The starting states for each individual look-behind sub-expression.
     start_look_behind: Vec<StateID>,
+    /// The length (in bytes) of the longest string matched by any
+    /// look-behind sub-expression. If `None`, the length is unbounded.
+    maximum_look_behind_len: Option<usize>,
     /// A map from pattern ID to capture group index to name. (If no name
     /// exists, then a None entry is present. Thus, all capturing groups are
     /// present in this mapping.)
@@ -374,7 +377,7 @@ pub struct Builder {
 impl Builder {
     /// Create a new builder for hand-assembling NFAs.
     pub fn new() -> Builder {
-        Builder::default()
+        Builder { maximum_look_behind_len: Some(0), ..Builder::default() }
     }
 
     /// Clear this builder.
@@ -453,6 +456,7 @@ impl Builder {
 
         nfa.set_starts(start_anchored, start_unanchored, &self.start_pattern);
         nfa.set_look_behind_starts(self.start_look_behind.as_slice());
+        nfa.set_maximum_look_behind_len(self.maximum_look_behind_len);
         nfa.set_captures(&self.captures).map_err(BuildError::captures)?;
         // The idea here is to convert our intermediate states to their final
         // form. The only real complexity here is the process of converting
@@ -711,9 +715,21 @@ impl Builder {
     }
 
     /// Adds the `start_id` to the set of starting states that is used when
-    /// running look-behind expressions.
-    pub fn start_look_behind(&mut self, start_id: StateID) {
+    /// running look-behind expressions. Additionally registers the maximum
+    /// length (in bytes) that the sub-expression of the look-behind can match.
+    pub fn start_look_behind(
+        &mut self,
+        start_id: StateID,
+        maximum_len: Option<usize>,
+    ) {
         self.start_look_behind.push(start_id);
+
+        self.maximum_look_behind_len =
+            match (self.maximum_look_behind_len, maximum_len) {
+                (Some(l1), Some(l2)) => Some(usize::max(l1, l2)),
+                // A None subsumes the entire result.
+                (None, _) | (_, None) => None,
+            };
     }
 
     /// Add an "empty" NFA state.

@@ -1039,7 +1039,10 @@ impl Compiler {
 
         let unanchored =
             self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
-        self.builder.borrow_mut().start_look_behind(unanchored.start);
+        let maximum_len = lookaround.sub().properties().maximum_len();
+        self.builder
+            .borrow_mut()
+            .start_look_behind(unanchored.start, maximum_len);
 
         let sub = self.c(lookaround.sub())?;
         let write = self.add_write_lookaround(idx)?;
