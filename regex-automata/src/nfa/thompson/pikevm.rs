@@ -1258,6 +1258,8 @@ impl PikeVM {
             Some(config) => config,
         };
 
+        let maximum_look_behind_len = self.nfa.maximum_look_behind_len();
+
         let pre =
             if anchored { None } else { self.get_config().get_prefilter() };
         let Cache {
@@ -1274,7 +1276,14 @@ impl PikeVM {
         if let Some(active) = match_lookaround {
             *curr_lookaround = active.clone();
         } else if self.lookaround_count() > 0 {
-            // This initializes the look-behind threads from the start of the input
+            // If we know the maximum look-behind length, we do not need to
+            // start from 0.
+            let start_position = usize::saturating_sub(
+                input.start(),
+                maximum_look_behind_len.unwrap_or(input.start()),
+            );
+
+            // This initializes the look-behind threads from the `start_position`
             // Note: since capture groups are not allowed inside look-behinds,
             // there won't be any Capture epsilon transitions and hence it is ok to
             // use &mut [] for the slots parameter. We need to add the start states
@@ -1289,14 +1298,14 @@ impl PikeVM {
                     curr_lookaround,
                     lookaround,
                     input,
-                    0,
+                    start_position,
                     *look_behind_start,
                 );
             }
             // This is necessary for look-behinds to be able to match outside of the
             // input span.
             self.fast_forward_lookbehinds(
-                Span { start: 0, end: input.start() },
+                Span { start: start_position, end: input.start() },
                 input,
                 stack,
                 curr_lookaround,
@@ -1346,10 +1355,46 @@ impl PikeVM {
                         None => break,
                         Some(ref span) => {
                             if self.lookaround_count() > 0 {
+                                // If we know the maximum look-behind length,
+                                // we might be able to catch up the look-behind
+                                // threads later than starting at `at`.
+                                let start_position = usize::max(
+                                    at,
+                                    usize::saturating_sub(
+                                        span.start,
+                                        maximum_look_behind_len
+                                            .unwrap_or(span.start),
+                                    ),
+                                );
+                                // If we resume from later than `at`, we need
+                                // to reinitialize the look-behind threads.
+                                if start_position != at {
+                                    curr_lookaround.set.clear();
+                                    for look_behind_start in self
+                                        .nfa
+                                        .look_behind_starts()
+                                        .iter()
+                                        .rev()
+                                    {
+                                        self.epsilon_closure(
+                                            stack,
+                                            &mut [],
+                                            curr_lookaround,
+                                            lookaround,
+                                            input,
+                                            start_position,
+                                            *look_behind_start,
+                                        );
+                                    }
+                                }
+
                                 // We are jumping ahead due to the pre-filter, thus we must bring
                                 // the look-behind threads to the new position.
                                 self.fast_forward_lookbehinds(
-                                    Span { start: at, end: span.start },
+                                    Span {
+                                        start: start_position,
+                                        end: span.start,
+                                    },
                                     input,
                                     stack,
                                     curr_lookaround,
