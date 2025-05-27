@@ -10,6 +10,8 @@ is can be faster than the [`PikeVM`](thompson::pikevm::PikeVM) in many cases
 because it does less book-keeping.
 */
 
+use std::collections::HashMap;
+
 use alloc::{vec, vec::Vec};
 
 use crate::{
@@ -17,6 +19,7 @@ use crate::{
     util::{
         captures::Captures,
         empty, iter,
+        look::Look,
         prefilter::Prefilter,
         primitives::{NonMaxUsize, PatternID, SmallIndex, StateID},
         search::{Anchored, HalfMatch, Input, Match, MatchError, Span},
@@ -1441,6 +1444,29 @@ impl BoundedBacktracker {
                 Frame::RestoreCapture { slot, offset } => {
                     slots[slot] = offset;
                 }
+                Frame::CacheLookAroundResult { sid, at } => {
+                    cache.la_result.insert((sid, at), cache.last_la_result);
+                }
+                Frame::CheckLookAround {
+                    sid,
+                    at,
+                    positive,
+                    was_reverse,
+                    was_in_la,
+                } => {
+                    cache.reverse = was_reverse;
+                    cache.in_la = was_in_la;
+                    if positive == cache.last_la_result {
+                        cache.last_la_result = false;
+                        if let Some(hm) =
+                            self.step(cache, input, sid, at, slots)
+                        {
+                            return Some(hm);
+                        }
+                    } else {
+                        cache.last_la_result = false;
+                    }
+                }
             }
         }
         None
@@ -1467,7 +1493,19 @@ impl BoundedBacktracker {
         slots: &mut [Option<NonMaxUsize>],
     ) -> Option<HalfMatch> {
         loop {
-            if !cache.visited.insert(sid, at - input.start()) {
+            if cache.in_la {
+                match cache.la_result.get(&(sid, at)) {
+                    Some(result) => {
+                        cache.last_la_result = *result;
+                        return None;
+                    }
+                    None => {
+                        cache
+                            .stack
+                            .push(Frame::CacheLookAroundResult { sid, at });
+                    }
+                }
+            } else if !cache.visited.insert(sid, at - input.start()) {
                 return None;
             }
             match *self.nfa.state(sid) {
@@ -1490,23 +1528,40 @@ impl BoundedBacktracker {
                         return None;
                     }
                     sid = trans.next;
-                    at += 1;
+                    if cache.reverse {
+                        at -= 1;
+                    } else {
+                        at += 1;
+                    }
                 }
                 State::Sparse(ref sparse) => {
                     if at >= input.end() {
                         return None;
                     }
                     sid = sparse.matches(input.haystack(), at)?;
-                    at += 1;
+                    if cache.reverse {
+                        at -= 1;
+                    } else {
+                        at += 1;
+                    }
                 }
                 State::Dense(ref dense) => {
                     if at >= input.end() {
                         return None;
                     }
                     sid = dense.matches(input.haystack(), at)?;
-                    at += 1;
+                    if cache.reverse {
+                        at -= 1;
+                    } else {
+                        at += 1;
+                    }
                 }
                 State::Look { look, next } => {
+                    let look = match look {
+                        Look::Start if cache.reverse => Look::End,
+                        Look::End if cache.reverse => Look::Start,
+                        _ => look,
+                    };
                     // OK because we don't permit building a searcher with a
                     // Unicode word boundary if the requisite Unicode data is
                     // unavailable.
@@ -1519,11 +1574,26 @@ impl BoundedBacktracker {
                     }
                     sid = next;
                 }
-                State::WriteLookAround { .. }
-                | State::CheckLookAround { .. } => {
-                    unimplemented!(
-                        "backtracking engine does not support look-arounds"
-                    );
+                State::CheckLookAround {
+                    lookaround_index,
+                    positive,
+                    next,
+                } => {
+                    cache.stack.push(Frame::CheckLookAround {
+                        sid: next,
+                        at,
+                        positive,
+                        was_reverse: cache.reverse,
+                        was_in_la: cache.in_la,
+                    });
+                    sid = self.nfa.look_behind_reverse_starts()
+                        [lookaround_index];
+                    cache.reverse = true;
+                    cache.in_la = true;
+                }
+                State::WriteLookAround { .. } => {
+                    cache.last_la_result = true;
+                    return None;
                 }
                 State::Union { ref alternates } => {
                     sid = match alternates.get(0) {
@@ -1667,6 +1737,14 @@ pub struct Cache {
     /// what "bounds" the backtracking and prevents it from having worst case
     /// exponential time.
     visited: Visited,
+    /// Caches the result of look-around computations.
+    la_result: HashMap<(StateID, usize), bool>,
+    /// Indicates whether the backtracker is currently checking a look-around.
+    in_la: bool,
+    /// Indicates whether the backtracker is currently searching in reverse.
+    reverse: bool,
+    /// Indicates whether the last checked look-around was matched
+    last_la_result: bool,
 }
 
 impl Cache {
@@ -1680,7 +1758,14 @@ impl Cache {
     /// `BoundedBacktracker`, then you must call [`Cache::reset`] with the
     /// desired `BoundedBacktracker`.
     pub fn new(re: &BoundedBacktracker) -> Cache {
-        Cache { stack: vec![], visited: Visited::new(re) }
+        Cache {
+            stack: vec![],
+            visited: Visited::new(re),
+            la_result: HashMap::new(),
+            in_la: false,
+            reverse: false,
+            last_la_result: false,
+        }
     }
 
     /// Reset this cache such that it can be used for searching with different
@@ -1735,6 +1820,7 @@ impl Cache {
     pub fn memory_usage(&self) -> usize {
         self.stack.len() * core::mem::size_of::<Frame>()
             + self.visited.memory_usage()
+        // TODO: calculate memory usage of hashmap
     }
 
     /// Clears this cache. This should be called at the start of every search
@@ -1754,6 +1840,10 @@ impl Cache {
     ) -> Result<(), MatchError> {
         self.stack.clear();
         self.visited.setup_search(re, input)?;
+        self.la_result.clear();
+        self.last_la_result = false;
+        self.in_la = false;
+        self.reverse = false;
         Ok(())
     }
 }
@@ -1768,6 +1858,19 @@ enum Frame {
     /// Look for a match starting at `sid` and the given position in the
     /// haystack.
     Step { sid: StateID, at: usize },
+    /// Same as Step, but before continuing, check if the result of the last
+    /// checked look-around condition matches `positive` and restore
+    /// the search direction.
+    CheckLookAround {
+        sid: StateID,
+        at: usize,
+        positive: bool,
+        was_reverse: bool,
+        was_in_la: bool,
+    },
+    /// Record of path that lead to a look-around result. This is traversed
+    /// in reverse to memoize the result of the expression.
+    CacheLookAroundResult { sid: StateID, at: usize },
     /// Reset the given `slot` to the given `offset` (which might be `None`).
     /// This effectively gives a "scope" to capturing groups, such that an
     /// offset for a particular group only gets returned if the match goes

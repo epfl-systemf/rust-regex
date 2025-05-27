@@ -1112,6 +1112,12 @@ impl NFA {
         &self.0.start_look_behind
     }
 
+    /// Returns the starting states for the reverse look-behind automata.
+    #[inline]
+    pub fn look_behind_reverse_starts(&self) -> &Vec<StateID> {
+        &self.0.start_look_behind_reverse
+    }
+
     // FIXME: The `look_set_prefix_all` computation was not correct, and it
     // seemed a little tricky to fix it. Since I wasn't actually using it for
     // anything, I just decided to remove it in the run up to the regex 1.9
