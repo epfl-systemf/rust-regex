@@ -1034,7 +1034,7 @@ impl Compiler {
         if !self.is_reverse() {
             let unanchored =
                 self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
-            self.builder.borrow_mut().start_look_behind(unanchored.start);
+            self.builder.borrow_mut().start_look_behind(unanchored.start, idx);
 
             // We need to compile the reversed version of the lookaround first.
             // This ensures that no other lookaround expressions get compiled,
@@ -1047,7 +1047,9 @@ impl Compiler {
             let sub_rev = self.c(lookaround.sub())?;
             let write_rev = self.add_write_lookaround(idx)?;
             self.patch(sub_rev.end, write_rev)?;
-            self.builder.borrow_mut().start_look_behind_reverse(sub_rev.start);
+            self.builder
+                .borrow_mut()
+                .start_look_behind_reverse(sub_rev.start, idx);
             self.set_reverse(false);
             *self.lookaround_index.borrow_mut() = backup_idx;
 

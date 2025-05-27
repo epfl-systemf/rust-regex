@@ -1520,10 +1520,15 @@ impl BoundedBacktracker {
                     // We should perhaps make the 'trans.matches()' API accept
                     // an '&Input' instead of a '&[u8]'. Or at least, add a new
                     // API that does it.
-                    if at >= input.end() {
+                    if !cache.reverse && at >= input.end()
+                        || cache.reverse && at == 0
+                    {
                         return None;
                     }
-                    if !trans.matches(input.haystack(), at) {
+                    if !trans.matches(
+                        input.haystack(),
+                        if cache.reverse { at - 1 } else { at },
+                    ) {
                         return None;
                     }
                     sid = trans.next;
@@ -1534,10 +1539,15 @@ impl BoundedBacktracker {
                     }
                 }
                 State::Sparse(ref sparse) => {
-                    if at >= input.end() {
+                    if !cache.reverse && at >= input.end()
+                        || cache.reverse && at == 0
+                    {
                         return None;
                     }
-                    sid = sparse.matches(input.haystack(), at)?;
+                    sid = sparse.matches(
+                        input.haystack(),
+                        if cache.reverse { at - 1 } else { at },
+                    )?;
                     if cache.reverse {
                         at -= 1;
                     } else {
@@ -1545,10 +1555,15 @@ impl BoundedBacktracker {
                     }
                 }
                 State::Dense(ref dense) => {
-                    if at >= input.end() {
+                    if !cache.reverse && at >= input.end()
+                        || cache.reverse && at == 0
+                    {
                         return None;
                     }
-                    sid = dense.matches(input.haystack(), at)?;
+                    sid = dense.matches(
+                        input.haystack(),
+                        if cache.reverse { at - 1 } else { at },
+                    )?;
                     if cache.reverse {
                         at -= 1;
                     } else {
@@ -1556,6 +1571,11 @@ impl BoundedBacktracker {
                     }
                 }
                 State::Look { look, next } => {
+                    // when compiling, look assertions are reversed. However,
+                    // since we do not operate on the reverse of the haystack,
+                    // we need to undo this reversal here.
+                    let look =
+                        if cache.reverse { look.reversed() } else { look };
                     // OK because we don't permit building a searcher with a
                     // Unicode word boundary if the requisite Unicode data is
                     // unavailable.

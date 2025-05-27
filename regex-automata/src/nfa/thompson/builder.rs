@@ -390,6 +390,7 @@ impl Builder {
         self.states.clear();
         self.start_pattern.clear();
         self.start_look_behind.clear();
+        self.start_look_behind_reverse.clear();
         self.captures.clear();
         self.memory_states = 0;
     }
@@ -717,8 +718,9 @@ impl Builder {
 
     /// Adds the `start_id` to the set of starting states that is used when
     /// running look-behind expressions.
-    pub fn start_look_behind(&mut self, start_id: StateID) {
+    pub fn start_look_behind(&mut self, start_id: StateID, index: SmallIndex) {
         self.start_look_behind.push(start_id);
+        assert!(self.start_look_behind.len() - 1 == index.as_usize());
     }
 
     /// Adds the `start_id` to the set of starting states that is used when
@@ -726,8 +728,13 @@ impl Builder {
     ///
     /// Look-behind expressions are searched in reverse when the backtracking
     /// engine is used.
-    pub fn start_look_behind_reverse(&mut self, start_id: StateID) {
+    pub fn start_look_behind_reverse(
+        &mut self,
+        start_id: StateID,
+        index: SmallIndex,
+    ) {
         self.start_look_behind_reverse.push(start_id);
+        assert!(self.start_look_behind.len() - 1 == index.as_usize());
     }
 
     /// Add an "empty" NFA state.

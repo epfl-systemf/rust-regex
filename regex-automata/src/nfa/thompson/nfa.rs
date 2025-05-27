@@ -1507,6 +1507,9 @@ impl Inner {
         for id in self.start_look_behind.iter_mut() {
             *id = old_to_new[*id];
         }
+        for id in self.start_look_behind_reverse.iter_mut() {
+            *id = old_to_new[*id];
+        }
     }
 }
 
@@ -1520,6 +1523,8 @@ impl fmt::Debug for Inner {
                 '>'
             } else if self.start_look_behind.contains(&sid) {
                 '<'
+            } else if self.start_look_behind_reverse.contains(&sid) {
+                'r'
             } else {
                 ' '
             };
