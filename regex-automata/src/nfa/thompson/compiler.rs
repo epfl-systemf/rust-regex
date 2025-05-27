@@ -1036,14 +1036,13 @@ impl Compiler {
                 self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
             self.builder.borrow_mut().start_look_behind(unanchored.start);
 
-            let look_idx_before_sub = *self.lookaround_index.borrow();
-            let sub = self.c(lookaround.sub())?;
-            let write = self.add_write_lookaround(idx)?;
-            self.patch(unanchored.end, sub.start)?;
-            self.patch(sub.end, write)?;
-
+            // We need to compile the reversed version of the lookaround first.
+            // This ensures that no other lookaround expressions get compiled,
+            // which would bring the start-states vector in the builder out of
+            // sync. This would not be the case if we compiled the forward
+            // version first because then we would recurse into sub-expressions
+            // for nested lookarounds.
             let backup_idx = *self.lookaround_index.borrow();
-            *self.lookaround_index.borrow_mut() = look_idx_before_sub;
             self.set_reverse(true);
             let sub_rev = self.c(lookaround.sub())?;
             let write_rev = self.add_write_lookaround(idx)?;
@@ -1051,6 +1050,11 @@ impl Compiler {
             self.builder.borrow_mut().start_look_behind_reverse(sub_rev.start);
             self.set_reverse(false);
             *self.lookaround_index.borrow_mut() = backup_idx;
+
+            let sub = self.c(lookaround.sub())?;
+            let write = self.add_write_lookaround(idx)?;
+            self.patch(unanchored.end, sub.start)?;
+            self.patch(sub.end, write)?;
         }
         Ok(ThompsonRef { start: check, end: check })
     }
@@ -2182,11 +2186,11 @@ mod tests {
                 s_bin_union(2, 1),
                 s_range(0, 255, 0),
                 s_check_lookaround(0, true, 9),
-                s_bin_union(5, 4),
+                s_bin_union(7, 4),
                 s_range(0, 255, 3),
-                s_look(Look::Start, 6),
+                s_look(Look::End, 6),
                 s_write_lookaround(0),
-                s_look(Look::End, 8),
+                s_look(Look::Start, 8),
                 s_write_lookaround(0),
                 s_byte(b'a', 10),
                 s_match(0)
@@ -2324,7 +2328,7 @@ mod tests {
             build(r"(?<=a)").states(),
             &[
                 s_check_lookaround(0, true, 7),
-                s_bin_union(3, 2),
+                s_bin_union(5, 2),
                 s_range(b'\x00', b'\xFF', 1),
                 s_byte(b'a', 4),
                 s_write_lookaround(0),
@@ -2337,19 +2341,19 @@ mod tests {
             build(r"(?<=a(?<!b))").states(),
             &[
                 s_check_lookaround(0, true, 15),
-                s_bin_union(3, 2),
+                s_bin_union(6, 2),
                 s_range(b'\x00', b'\xFF', 1),
-                s_byte(b'a', 4),
-                s_check_lookaround(1, false, 11),
-                s_bin_union(7, 6),
-                s_range(b'\x00', b'\xFF', 5),
-                s_byte(b'b', 8),
-                s_write_lookaround(1),
-                s_byte(b'b', 10),
-                s_write_lookaround(1),
+                s_check_lookaround(1, false, 4),
+                s_byte(b'a', 5),
                 s_write_lookaround(0),
-                s_check_lookaround(1, false, 13),
-                s_byte(b'a', 14),
+                s_byte(b'a', 7),
+                s_check_lookaround(1, false, 14),
+                s_bin_union(12, 9),
+                s_range(b'\x00', b'\xFF', 8),
+                s_byte(b'b', 11),
+                s_write_lookaround(1),
+                s_byte(b'b', 13),
+                s_write_lookaround(1),
                 s_write_lookaround(0),
                 s_match(0)
             ]

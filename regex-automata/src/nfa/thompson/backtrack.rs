@@ -19,7 +19,6 @@ use crate::{
     util::{
         captures::Captures,
         empty, iter,
-        look::Look,
         prefilter::Prefilter,
         primitives::{NonMaxUsize, PatternID, SmallIndex, StateID},
         search::{Anchored, HalfMatch, Input, Match, MatchError, Span},
@@ -1557,11 +1556,6 @@ impl BoundedBacktracker {
                     }
                 }
                 State::Look { look, next } => {
-                    let look = match look {
-                        Look::Start if cache.reverse => Look::End,
-                        Look::End if cache.reverse => Look::Start,
-                        _ => look,
-                    };
                     // OK because we don't permit building a searcher with a
                     // Unicode word boundary if the requisite Unicode data is
                     // unavailable.

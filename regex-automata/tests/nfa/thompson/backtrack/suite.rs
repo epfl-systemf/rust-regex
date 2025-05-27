@@ -74,10 +74,6 @@ fn min_visited_capacity() -> Result<()> {
                 .configure(config_thompson(test))
                 .syntax(config_syntax(test))
                 .build_many(&regexes)?;
-            // The backtracker doesn't support lookarounds, so skip if there are any.
-            if nfa.lookaround_count() > 0 {
-                return Ok(CompiledRegex::skip());
-            }
             let mut builder = BoundedBacktracker::builder();
             if !configure_backtrack_builder(test, &mut builder) {
                 return Ok(CompiledRegex::skip());
