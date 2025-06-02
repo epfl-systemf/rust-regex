@@ -713,6 +713,11 @@ pub struct Compiler {
     utf8_suffix: RefCell<Utf8SuffixMap>,
     /// The next index to use for a look-around expression.
     lookaround_index: RefCell<SmallIndex>,
+    /// How far from the beginning (in bytes) of the main regex does the
+    /// current look-behind start at. This is updated when relativizing to
+    /// the current look-behind expression. When `None`, the distance can be
+    /// seen as infinity.
+    current_lookbehind_offset_from_start: RefCell<Option<usize>>,
 }
 
 impl Compiler {
@@ -726,6 +731,7 @@ impl Compiler {
             trie_state: RefCell::new(RangeTrie::new()),
             utf8_suffix: RefCell::new(Utf8SuffixMap::new(1000)),
             lookaround_index: RefCell::new(SmallIndex::ZERO),
+            current_lookbehind_offset_from_start: RefCell::new(Some(0)),
         }
     }
 
@@ -1022,10 +1028,13 @@ impl Compiler {
         }
     }
 
+    /// Compile a look-around expression as its own sub-automaton. Its starting
+    /// state is saved.
     fn c_lookaround(
         &self,
         lookaround: &LookAround,
     ) -> Result<ThompsonRef, BuildError> {
+        // Assign a unique index for this look-around.
         let idx = *self.lookaround_index.borrow();
         *self.lookaround_index.borrow_mut() = SmallIndex::new(idx.one_more())
             .map_err(|e| {
@@ -1037,14 +1046,31 @@ impl Compiler {
         };
         let check = self.add_check_lookaround(idx, pos)?;
 
+        // Compute the furthest offset from the start of the main regex
+        // where this look-around can begin at. We offset the current start
+        // offset by the maximal match length of the subexpression.
+        let maximum_len = lookaround.sub().properties().maximum_len();
+        let relative_start =
+            *self.current_lookbehind_offset_from_start.borrow();
+        let start_offset = match (relative_start, maximum_len) {
+            (Some(s), Some(l)) => Some(s + l),
+            (None, _) | (_, None) => None,
+        };
+
         let unanchored =
             self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
-        let maximum_len = lookaround.sub().properties().maximum_len();
         self.builder
             .borrow_mut()
-            .start_look_behind(unanchored.start, maximum_len);
+            .start_look_behind(unanchored.start, start_offset);
 
+        // When compiling the subexpression we temporarily change the starting
+        // offset and restore it after. This way, the subexpression is relativized
+        // to our current offset.
+        *self.current_lookbehind_offset_from_start.borrow_mut() = start_offset;
         let sub = self.c(lookaround.sub())?;
+        *self.current_lookbehind_offset_from_start.borrow_mut() =
+            relative_start;
+
         let write = self.add_write_lookaround(idx)?;
         self.patch(unanchored.end, sub.start)?;
         self.patch(sub.end, write)?;

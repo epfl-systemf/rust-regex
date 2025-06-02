@@ -1258,7 +1258,8 @@ impl PikeVM {
             Some(config) => config,
         };
 
-        let maximum_look_behind_len = self.nfa.maximum_look_behind_len();
+        let maximum_lookbehind_offset_from_start =
+            self.nfa.maximum_lookbehind_offset_from_start();
 
         let pre =
             if anchored { None } else { self.get_config().get_prefilter() };
@@ -1280,7 +1281,7 @@ impl PikeVM {
             // start from 0.
             let start_position = usize::saturating_sub(
                 input.start(),
-                maximum_look_behind_len.unwrap_or(input.start()),
+                maximum_lookbehind_offset_from_start.unwrap_or(input.start()),
             );
 
             // This initializes the look-behind threads from the `start_position`
@@ -1362,7 +1363,7 @@ impl PikeVM {
                                     at,
                                     usize::saturating_sub(
                                         span.start,
-                                        maximum_look_behind_len
+                                        maximum_lookbehind_offset_from_start
                                             .unwrap_or(span.start),
                                     ),
                                 );
