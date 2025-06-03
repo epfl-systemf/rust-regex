@@ -1108,15 +1108,8 @@ impl NFA {
 
     /// Returns the starting states for initializing look-behind evaluation.
     #[inline]
-    pub fn look_behind_starts(&self) -> &Vec<StateID> {
-        &self.0.start_look_behind
-    }
-
-    /// Returns the length (in bytes) of the longest string matched by any
-    /// look-behind sub-expression. If `None`, the length is unbounded.
-    #[inline]
-    pub fn maximum_lookbehind_offset_from_start(&self) -> Option<usize> {
-        self.0.maximum_lookbehind_offset_from_start
+    pub fn lookbehinds(&self) -> &Vec<LookBehindInfo> {
+        &self.0.lookbehinds
     }
 
     // FIXME: The `look_set_prefix_all` computation was not correct, and it
@@ -1284,17 +1277,46 @@ pub(super) struct Inner {
     /// This is needed to initialize the table for storing the result of
     /// look-around evaluation.
     lookaround_count: usize,
-    /// Contains the start state for each of the look-behind subexpressions.
-    start_look_behind: Vec<StateID>,
-    /// Among all look-behinds, this is the furthest offset (in bytes) from
-    /// the beginning of the main regex that a look-behind starts at.
-    /// If `None`, the offset is unbounded.
-    maximum_lookbehind_offset_from_start: Option<usize>,
+    /// A vector of meta-data information about each look-behind in this NFA.
+    ///
+    /// Must be stored in a depth-first pre-order with regards to the nesting
+    /// of look-behinds.
+    lookbehinds: Vec<LookBehindInfo>,
     /// Heap memory used indirectly by NFA states and other things (like the
     /// various capturing group representations above). Since each state
     /// might use a different amount of heap, we need to keep track of this
     /// incrementally.
     memory_extra: usize,
+}
+
+/// Information about a look-behind needed for execution.
+#[derive(Clone, Copy, Debug)]
+pub struct LookBehindInfo {
+    /// The id of the start state of the look-behind subexpression.
+    start_id: StateID,
+    /// The offset (in bytes) from the beginning of the main regex that a
+    /// look-behind starts at. If `None`, the offset is unbounded.
+    offset_from_start: Option<usize>,
+}
+
+impl LookBehindInfo {
+    pub(super) fn new(
+        start_id: StateID,
+        offset_from_start: Option<usize>,
+    ) -> Self {
+        Self { start_id, offset_from_start }
+    }
+
+    /// Start states of the look-behind subexpression.
+    pub(super) fn start_state(&self) -> StateID {
+        self.start_id
+    }
+
+    /// The offset (in bytes) from the beginning of the main regex that a
+    /// look-behind starts at. If `None`, the offset is unbounded.
+    pub(super) fn offset_from_start(&self) -> Option<usize> {
+        self.offset_from_start
+    }
 }
 
 impl Inner {
@@ -1439,19 +1461,12 @@ impl Inner {
         self.start_pattern = start_pattern.to_vec();
     }
 
-    pub(super) fn set_look_behind_starts(
-        &mut self,
-        look_behind_starts: &[StateID],
-    ) {
-        self.start_look_behind = look_behind_starts.to_vec();
-    }
-
-    pub(super) fn set_maximum_lookbehind_offset_from_start(
-        &mut self,
-        maximum_lookbehind_offset_from_start: Option<usize>,
-    ) {
-        self.maximum_lookbehind_offset_from_start =
-            maximum_lookbehind_offset_from_start;
+    /// Sets the look-behind information of this NFA.
+    ///
+    /// The slice must be in a depth-first pre-order with regards to the
+    /// nesting of look-behinds.
+    pub(super) fn set_lookbehinds(&mut self, lookbehinds: &[LookBehindInfo]) {
+        self.lookbehinds = lookbehinds.to_vec();
     }
 
     /// Sets the UTF-8 mode of this NFA.
@@ -1507,7 +1522,8 @@ impl Inner {
         for id in self.start_pattern.iter_mut() {
             *id = old_to_new[*id];
         }
-        for id in self.start_look_behind.iter_mut() {
+        for LookBehindInfo { start_id: id, .. } in self.lookbehinds.iter_mut()
+        {
             *id = old_to_new[*id];
         }
     }
@@ -1521,7 +1537,7 @@ impl fmt::Debug for Inner {
                 '^'
             } else if sid == self.start_unanchored {
                 '>'
-            } else if self.start_look_behind.contains(&sid) {
+            } else if self.lookbehinds.iter().any(|i| i.start_state() == sid) {
                 '<'
             } else {
                 ' '

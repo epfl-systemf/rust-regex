@@ -1061,7 +1061,7 @@ impl Compiler {
             self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
         self.builder
             .borrow_mut()
-            .start_look_behind(unanchored.start, start_offset);
+            .start_lookbehind(unanchored.start, start_offset);
 
         // When compiling the subexpression we temporarily change the starting
         // offset and restore it after. This way, the subexpression is relativized

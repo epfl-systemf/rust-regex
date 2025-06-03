@@ -5,7 +5,7 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use crate::{
     nfa::thompson::{
         error::BuildError,
-        nfa::{self, SparseTransitions, Transition, NFA},
+        nfa::{self, LookBehindInfo, SparseTransitions, Transition, NFA},
     },
     util::{
         look::{Look, LookMatcher},
@@ -340,12 +340,11 @@ pub struct Builder {
     /// contains a single regex, then `start_pattern[0]` and `start_anchored`
     /// are always equivalent.
     start_pattern: Vec<StateID>,
-    /// The starting states for each individual look-behind sub-expression.
-    start_look_behind: Vec<StateID>,
-    /// Among all look-behinds, this is the furthest offset (in bytes) from
-    /// the beginning of the main regex that a look-behind starts at.
-    /// If `None`, the offset is unbounded.
-    maximum_lookbehind_offset_from_start: Option<usize>,
+    /// A vector of meta-data information about each look-behind in this NFA.
+    ///
+    /// Must be stored in a depth-first pre-order with regards to the nesting
+    /// of look-behinds.
+    lookbehinds: Vec<LookBehindInfo>,
     /// A map from pattern ID to capture group index to name. (If no name
     /// exists, then a None entry is present. Thus, all capturing groups are
     /// present in this mapping.)
@@ -378,10 +377,7 @@ pub struct Builder {
 impl Builder {
     /// Create a new builder for hand-assembling NFAs.
     pub fn new() -> Builder {
-        Builder {
-            maximum_lookbehind_offset_from_start: Some(0),
-            ..Builder::default()
-        }
+        Builder::default()
     }
 
     /// Clear this builder.
@@ -394,7 +390,7 @@ impl Builder {
         self.pattern_id = None;
         self.states.clear();
         self.start_pattern.clear();
-        self.start_look_behind.clear();
+        self.lookbehinds.clear();
         self.captures.clear();
         self.memory_states = 0;
     }
@@ -459,10 +455,7 @@ impl Builder {
         remap.resize(self.states.len(), StateID::ZERO);
 
         nfa.set_starts(start_anchored, start_unanchored, &self.start_pattern);
-        nfa.set_look_behind_starts(self.start_look_behind.as_slice());
-        nfa.set_maximum_lookbehind_offset_from_start(
-            self.maximum_lookbehind_offset_from_start,
-        );
+        nfa.set_lookbehinds(self.lookbehinds.as_slice());
         nfa.set_captures(&self.captures).map_err(BuildError::captures)?;
         // The idea here is to convert our intermediate states to their final
         // form. The only real complexity here is the process of converting
@@ -724,21 +717,16 @@ impl Builder {
     /// running look-behind expressions. Additionally registers the furthest
     /// offset (in bytes) from the start of the main regex this look-behind
     /// starts.
-    pub fn start_look_behind(
+    ///
+    /// Look-behinds must be started in a depth-first pre-order fashion with
+    /// regards to the nesting of look-behinds.
+    pub fn start_lookbehind(
         &mut self,
         start_id: StateID,
         offset_from_start: Option<usize>,
     ) {
-        self.start_look_behind.push(start_id);
-
-        self.maximum_lookbehind_offset_from_start = match (
-            self.maximum_lookbehind_offset_from_start,
-            offset_from_start,
-        ) {
-            (Some(l1), Some(l2)) => Some(usize::max(l1, l2)),
-            // A None subsumes the entire result.
-            (None, _) | (_, None) => None,
-        };
+        self.lookbehinds
+            .push(LookBehindInfo::new(start_id, offset_from_start));
     }
 
     /// Add an "empty" NFA state.

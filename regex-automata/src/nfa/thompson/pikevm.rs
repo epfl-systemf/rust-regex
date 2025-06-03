@@ -278,7 +278,24 @@ impl Builder {
     /// given here is already built.
     pub fn build_from_nfa(&self, nfa: NFA) -> Result<PikeVM, BuildError> {
         nfa.look_set_any().available().map_err(BuildError::word)?;
-        Ok(PikeVM { config: self.config.clone(), nfa })
+
+        // The reverse of a depth-first pre-order is the depth-first
+        // reverse-post-order. This means, a look-around is always before its
+        // surrounding look-behinds in this vector.
+        let lookbehind_starts =
+            nfa.lookbehinds().iter().map(|i| i.start_state()).rev().collect();
+
+        let maximum_lookbehind_offset_from_start =
+            nfa.lookbehinds().iter().try_fold(0, |acc, curr| {
+                curr.offset_from_start().map(|o| usize::max(acc, o))
+            });
+
+        Ok(PikeVM {
+            config: self.config.clone(),
+            nfa,
+            lookbehind_starts,
+            maximum_lookbehind_offset_from_start,
+        })
     }
 
     /// Apply the given `PikeVM` configuration options to this builder.
@@ -387,6 +404,13 @@ impl Builder {
 pub struct PikeVM {
     config: Config,
     nfa: NFA,
+    /// Stored depth-first reverse-post-order with regards to the nesting
+    /// of look-behinds.
+    lookbehind_starts: Vec<StateID>,
+    /// Among all look-behinds, this is the furthest offset (in bytes) from
+    /// the beginning of the main regex that a look-behind starts at.
+    /// If `None`, the offset is unbounded.
+    maximum_lookbehind_offset_from_start: Option<usize>,
 }
 
 impl PikeVM {
@@ -1258,9 +1282,6 @@ impl PikeVM {
             Some(config) => config,
         };
 
-        let maximum_lookbehind_offset_from_start =
-            self.nfa.maximum_lookbehind_offset_from_start();
-
         let pre =
             if anchored { None } else { self.get_config().get_prefilter() };
         let Cache {
@@ -1281,18 +1302,17 @@ impl PikeVM {
             // start from 0.
             let start_position = usize::saturating_sub(
                 input.start(),
-                maximum_lookbehind_offset_from_start.unwrap_or(input.start()),
+                self.maximum_lookbehind_offset_from_start
+                    .unwrap_or(input.start()),
             );
 
             // This initializes the look-behind threads from the `start_position`
             // Note: since capture groups are not allowed inside look-behinds,
             // there won't be any Capture epsilon transitions and hence it is ok to
-            // use &mut [] for the slots parameter. We need to add the start states
-            // in reverse because more deeply nested look-behinds have a higher index
-            // but must be executed first, so that the result is available for the
-            // outer expression.
-            for look_behind_start in self.nfa.look_behind_starts().iter().rev()
-            {
+            // use &mut [] for the slots parameter. Since the start states are stored
+            // in depth-first reverse-post-order, more deeply nested look-behinds are
+            // executed first, so that the result is available for the outer expression.
+            for look_behind_start in &self.lookbehind_starts {
                 self.epsilon_closure(
                     stack,
                     &mut [],
@@ -1363,7 +1383,7 @@ impl PikeVM {
                                     at,
                                     usize::saturating_sub(
                                         span.start,
-                                        maximum_lookbehind_offset_from_start
+                                        self.maximum_lookbehind_offset_from_start
                                             .unwrap_or(span.start),
                                     ),
                                 );
@@ -1371,11 +1391,8 @@ impl PikeVM {
                                 // to reinitialize the look-behind threads.
                                 if start_position != at {
                                     curr_lookaround.set.clear();
-                                    for look_behind_start in self
-                                        .nfa
-                                        .look_behind_starts()
-                                        .iter()
-                                        .rev()
+                                    for look_behind_start in
+                                        &self.lookbehind_starts
                                     {
                                         self.epsilon_closure(
                                             stack,
@@ -1598,7 +1615,7 @@ impl PikeVM {
             match_lookaround: _,
         } = cache;
 
-        for look_behind_start in self.nfa.look_behind_starts().iter().rev() {
+        for look_behind_start in &self.lookbehind_starts {
             self.epsilon_closure(
                 stack,
                 &mut [],
