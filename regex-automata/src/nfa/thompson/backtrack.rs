@@ -10,8 +10,6 @@ is can be faster than the [`PikeVM`](thompson::pikevm::PikeVM) in many cases
 because it does less book-keeping.
 */
 
-use std::collections::HashMap;
-
 use alloc::{vec, vec::Vec};
 
 use crate::{
@@ -41,7 +39,7 @@ use crate::{
 /// Be warned that this number could be quite large as it is multiplicative in
 /// the size the given NFA and haystack.
 pub fn min_visited_capacity(nfa: &NFA, input: &Input<'_>) -> usize {
-    div_ceil(nfa.states().len() * (input.get_span().len() + 1), 8)
+    div_ceil(nfa.states().len() * (input.end() + 1), 8)
 }
 
 /// The configuration used for building a bounded backtracker.
@@ -1444,7 +1442,9 @@ impl BoundedBacktracker {
                     slots[slot] = offset;
                 }
                 Frame::CacheLookAroundResult { sid, at } => {
-                    cache.la_result.insert((sid, at), cache.last_la_result);
+                    if cache.last_la_result {
+                        cache.la_result.insert(sid, at);
+                    }
                 }
                 Frame::CheckLookAround {
                     sid,
@@ -1492,20 +1492,13 @@ impl BoundedBacktracker {
         slots: &mut [Option<NonMaxUsize>],
     ) -> Option<HalfMatch> {
         loop {
-            if cache.in_la {
-                match cache.la_result.get(&(sid, at)) {
-                    Some(result) => {
-                        cache.last_la_result = *result;
-                        return None;
-                    }
-                    None => {
-                        cache
-                            .stack
-                            .push(Frame::CacheLookAroundResult { sid, at });
-                    }
+            if !cache.visited.insert(sid, at) {
+                if cache.in_la {
+                    cache.last_la_result = cache.la_result.get(sid, at);
                 }
-            } else if !cache.visited.insert(sid, at - input.start()) {
                 return None;
+            } else if cache.in_la {
+                cache.stack.push(Frame::CacheLookAroundResult { sid, at });
             }
             match *self.nfa.state(sid) {
                 State::ByteRange { ref trans } => {
@@ -1752,7 +1745,7 @@ pub struct Cache {
     /// exponential time.
     visited: Visited,
     /// Caches the result of look-around computations.
-    la_result: HashMap<(StateID, usize), bool>,
+    la_result: Visited,
     /// Indicates whether the backtracker is currently checking a look-around.
     in_la: bool,
     /// Indicates whether the backtracker is currently searching in reverse.
@@ -1775,7 +1768,7 @@ impl Cache {
         Cache {
             stack: vec![],
             visited: Visited::new(re),
-            la_result: HashMap::new(),
+            la_result: Visited::new(re),
             in_la: false,
             reverse: false,
             last_la_result: false,
@@ -1854,7 +1847,7 @@ impl Cache {
     ) -> Result<(), MatchError> {
         self.stack.clear();
         self.visited.setup_search(re, input)?;
-        self.la_result.clear();
+        self.la_result.setup_search(re, input)?;
         self.last_la_result = false;
         self.in_la = false;
         self.reverse = false;
@@ -1952,6 +1945,14 @@ impl Visited {
         true
     }
 
+    fn get(&self, sid: StateID, at: usize) -> bool {
+        let table_index = sid.as_usize() * self.stride + at;
+        let block_index = table_index / Visited::BLOCK_SIZE;
+        let bit = table_index % Visited::BLOCK_SIZE;
+        let block_with_bit = 1 << bit;
+        self.bitset[block_index] & block_with_bit != 0
+    }
+
     /// Reset this visited set to work with the given bounded backtracker.
     fn reset(&mut self, _: &BoundedBacktracker) {
         self.bitset.truncate(0);
@@ -1966,9 +1967,10 @@ impl Visited {
         re: &BoundedBacktracker,
         input: &Input<'_>,
     ) -> Result<(), MatchError> {
-        // Our haystack length is only the length of the span of the entire
-        // haystack that we'll be searching.
-        let haylen = input.get_span().len();
+        // Our haystack length is the length of the span of the entire
+        // haystack that we'll be searching plus the length up to the start
+        // to account for look-behinds.
+        let haylen = input.end();
         let err = || MatchError::haystack_too_long(haylen);
         // Our stride is one more than the length of the input because our main
         // search loop includes the position at input.end(). (And it does this
