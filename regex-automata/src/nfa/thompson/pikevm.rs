@@ -1515,7 +1515,7 @@ impl PikeVM {
         // are started before their outer look-behind's due to the requirements of
         // the self.lookbehinds vector.
 
-        if self.lookaround_count() > 0 {
+        if !self.lookbehinds.is_empty() {
             let total_distance = forward_span.end - forward_span.start;
 
             let start_offset = usize::min(
