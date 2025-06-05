@@ -5,7 +5,7 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use crate::{
     nfa::thompson::{
         error::BuildError,
-        nfa::{self, LookBehindInfo, SparseTransitions, Transition, NFA},
+        nfa::{self, LookBehindTree, SparseTransitions, Transition, NFA},
     },
     util::{
         look::{Look, LookMatcher},
@@ -340,11 +340,9 @@ pub struct Builder {
     /// contains a single regex, then `start_pattern[0]` and `start_anchored`
     /// are always equivalent.
     start_pattern: Vec<StateID>,
-    /// A vector of meta-data information about each look-behind in this NFA.
-    ///
-    /// Must be stored in a depth-first pre-order with regards to the nesting
-    /// of look-behinds.
-    lookbehinds: Vec<LookBehindInfo>,
+    /// A vector of look-behinds appearing in the regex. Order reflects the
+    /// order in the regex.
+    lookbehinds: Vec<LookBehindTree>,
     /// A map from pattern ID to capture group index to name. (If no name
     /// exists, then a None entry is present. Thus, all capturing groups are
     /// present in this mapping.)
@@ -719,14 +717,21 @@ impl Builder {
     /// starts.
     ///
     /// Look-behinds must be started in a depth-first pre-order fashion with
-    /// regards to the nesting of look-behinds.
+    /// regards to the nesting of look-behinds. The nesting path is stored
+    /// as indices in `path`.
     pub fn start_lookbehind(
         &mut self,
         start_id: StateID,
         offset_from_start: Option<usize>,
+        path: &[usize],
     ) {
-        self.lookbehinds
-            .push(LookBehindInfo::new(start_id, offset_from_start));
+        let mut current = &mut self.lookbehinds;
+
+        for index in path {
+            current = current[*index].children_mut();
+        }
+
+        current.push(LookBehindTree::new(start_id, offset_from_start));
     }
 
     /// Add an "empty" NFA state.

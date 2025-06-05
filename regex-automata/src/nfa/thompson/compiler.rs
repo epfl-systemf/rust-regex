@@ -718,6 +718,8 @@ pub struct Compiler {
     /// the current look-behind expression. When `None`, the distance can be
     /// seen as infinity.
     current_lookbehind_offset_from_start: RefCell<Option<usize>>,
+    /// The current path of look-behind nesting.
+    lookbehind_nesting_path: RefCell<Vec<usize>>,
 }
 
 impl Compiler {
@@ -732,6 +734,7 @@ impl Compiler {
             utf8_suffix: RefCell::new(Utf8SuffixMap::new(1000)),
             lookaround_index: RefCell::new(SmallIndex::ZERO),
             current_lookbehind_offset_from_start: RefCell::new(Some(0)),
+            lookbehind_nesting_path: RefCell::new(vec![0]),
         }
     }
 
@@ -972,6 +975,8 @@ impl Compiler {
             .borrow_mut()
             .set_size_limit(self.config.get_nfa_size_limit())?;
         *self.lookaround_index.borrow_mut() = SmallIndex::ZERO;
+        *self.lookbehind_nesting_path.borrow_mut() = vec![0];
+        *self.current_lookbehind_offset_from_start.borrow_mut() = Some(0);
 
         // We always add an unanchored prefix unless we were specifically told
         // not to (for tests only), or if we know that the regex is anchored
@@ -1059,15 +1064,22 @@ impl Compiler {
 
         let unanchored =
             self.c_at_least(&Hir::dot(hir::Dot::AnyByte), false, 0)?;
-        self.builder
-            .borrow_mut()
-            .start_lookbehind(unanchored.start, start_offset);
+        self.builder.borrow_mut().start_lookbehind(
+            unanchored.start,
+            start_offset,
+            self.lookbehind_nesting_path.borrow().split_last().unwrap().1,
+        );
 
         // When compiling the subexpression we temporarily change the starting
         // offset and restore it after. This way, the subexpression is relativized
-        // to our current offset.
+        // to our current offset. We also update the path to the current lookbehind
+        // expression.
+        self.lookbehind_nesting_path.borrow_mut().push(0);
         *self.current_lookbehind_offset_from_start.borrow_mut() = start_offset;
         let sub = self.c(lookaround.sub())?;
+        let mut path = self.lookbehind_nesting_path.borrow_mut();
+        path.pop();
+        *path.last_mut().unwrap() += 1;
         *self.current_lookbehind_offset_from_start.borrow_mut() =
             relative_start;
 

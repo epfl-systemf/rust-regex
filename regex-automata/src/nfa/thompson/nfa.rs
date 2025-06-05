@@ -1108,7 +1108,7 @@ impl NFA {
 
     /// Returns the starting states for initializing look-behind evaluation.
     #[inline]
-    pub fn lookbehinds(&self) -> &Vec<LookBehindInfo> {
+    pub fn lookbehinds(&self) -> &[LookBehindTree] {
         &self.0.lookbehinds
     }
 
@@ -1277,11 +1277,9 @@ pub(super) struct Inner {
     /// This is needed to initialize the table for storing the result of
     /// look-around evaluation.
     lookaround_count: usize,
-    /// A vector of meta-data information about each look-behind in this NFA.
-    ///
-    /// Must be stored in a depth-first pre-order with regards to the nesting
-    /// of look-behinds.
-    lookbehinds: Vec<LookBehindInfo>,
+    /// A vector of look-behinds appearing in the regex. Order reflects the
+    /// order in the regex.
+    lookbehinds: Vec<LookBehindTree>,
     /// Heap memory used indirectly by NFA states and other things (like the
     /// various capturing group representations above). Since each state
     /// might use a different amount of heap, we need to keep track of this
@@ -1289,33 +1287,72 @@ pub(super) struct Inner {
     memory_extra: usize,
 }
 
-/// Information about a look-behind needed for execution.
-#[derive(Clone, Copy, Debug)]
-pub struct LookBehindInfo {
-    /// The id of the start state of the look-behind subexpression.
+/// Information about a look-behinds needed for execution. It preserves the
+/// nesting structure of look-behinds.
+#[derive(Clone, Debug)]
+pub struct LookBehindTree {
     start_id: StateID,
-    /// The offset (in bytes) from the beginning of the main regex that a
-    /// look-behind starts at. If `None`, the offset is unbounded.
     offset_from_start: Option<usize>,
+    children: Vec<LookBehindTree>,
 }
 
-impl LookBehindInfo {
-    pub(super) fn new(
-        start_id: StateID,
-        offset_from_start: Option<usize>,
-    ) -> Self {
-        Self { start_id, offset_from_start }
+impl LookBehindTree {
+    pub fn new(start_id: StateID, offset_from_start: Option<usize>) -> Self {
+        Self { start_id, offset_from_start, children: Vec::new() }
     }
 
-    /// Start states of the look-behind subexpression.
-    pub(super) fn start_state(&self) -> StateID {
+    /// The id of the start state of the look-behind subexpression.
+    pub fn start_id(&self) -> StateID {
         self.start_id
     }
 
     /// The offset (in bytes) from the beginning of the main regex that a
     /// look-behind starts at. If `None`, the offset is unbounded.
-    pub(super) fn offset_from_start(&self) -> Option<usize> {
+    pub fn offset_from_start(&self) -> Option<usize> {
         self.offset_from_start
+    }
+
+    /// The look-behinds this look-behind contains. Order reflects the order
+    /// in the regex.
+    pub fn children(&self) -> &[LookBehindTree] {
+        &self.children
+    }
+
+    /// Calls `fun` on this look-behind tree and all of its children in pre-order.
+    /// `fun` should return `true` if the traversal should continue and `false`
+    /// if it should stop.
+    ///
+    /// The return value indicates whether the traversal was at any point stopped.
+    pub fn preorder(&self, fun: &impl Fn(&LookBehindTree) -> bool) -> bool {
+        if !fun(self) {
+            return false;
+        }
+        for child in &self.children {
+            if !child.preorder(fun) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Like [`preorder`], but allows mutating the nodes.
+    pub fn preorder_mut(
+        &mut self,
+        fun: &impl Fn(&mut LookBehindTree) -> bool,
+    ) -> bool {
+        if !fun(self) {
+            return false;
+        }
+        for child in &mut self.children {
+            if !child.preorder_mut(fun) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn children_mut(&mut self) -> &mut Vec<LookBehindTree> {
+        &mut self.children
     }
 }
 
@@ -1465,7 +1502,7 @@ impl Inner {
     ///
     /// The slice must be in a depth-first pre-order with regards to the
     /// nesting of look-behinds.
-    pub(super) fn set_lookbehinds(&mut self, lookbehinds: &[LookBehindInfo]) {
+    pub(super) fn set_lookbehinds(&mut self, lookbehinds: &[LookBehindTree]) {
         self.lookbehinds = lookbehinds.to_vec();
     }
 
@@ -1522,9 +1559,12 @@ impl Inner {
         for id in self.start_pattern.iter_mut() {
             *id = old_to_new[*id];
         }
-        for LookBehindInfo { start_id: id, .. } in self.lookbehinds.iter_mut()
-        {
-            *id = old_to_new[*id];
+
+        for lbs in self.lookbehinds.iter_mut() {
+            lbs.preorder_mut(&|e| {
+                e.start_id = old_to_new[e.start_id];
+                true
+            });
         }
     }
 }
@@ -1537,7 +1577,11 @@ impl fmt::Debug for Inner {
                 '^'
             } else if sid == self.start_unanchored {
                 '>'
-            } else if self.lookbehinds.iter().any(|i| i.start_state() == sid) {
+            } else if self
+                .lookbehinds
+                .iter()
+                .any(|i| !i.preorder(&|e| e.start_id() != sid))
+            {
                 '<'
             } else {
                 ' '
