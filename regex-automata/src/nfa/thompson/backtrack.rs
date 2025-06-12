@@ -1058,7 +1058,7 @@ impl BoundedBacktracker {
     ) -> TryFindMatches<'r, 'c, 'h> {
         let caps = Captures::matches(self.get_nfa().group_info().clone());
         let it = iter::Searcher::new(input.into());
-        TryFindMatches { re: self, cache, caps, it }
+        TryFindMatches { re: self, cache, caps, it, first_search: true }
     }
 
     /// Returns an iterator over all non-overlapping `Captures` values. If no
@@ -1109,7 +1109,7 @@ impl BoundedBacktracker {
     ) -> TryCapturesMatches<'r, 'c, 'h> {
         let caps = self.create_captures();
         let it = iter::Searcher::new(input.into());
-        TryCapturesMatches { re: self, cache, caps, it }
+        TryCapturesMatches { re: self, cache, caps, it, first_search: true }
     }
 }
 
@@ -1657,6 +1657,7 @@ pub struct TryFindMatches<'r, 'c, 'h> {
     cache: &'c mut Cache,
     caps: Captures,
     it: iter::Searcher<'h>,
+    first_search: bool,
 }
 
 impl<'r, 'c, 'h> Iterator for TryFindMatches<'r, 'c, 'h> {
@@ -1665,13 +1666,30 @@ impl<'r, 'c, 'h> Iterator for TryFindMatches<'r, 'c, 'h> {
     #[inline]
     fn next(&mut self) -> Option<Result<Match, MatchError>> {
         // Splitting 'self' apart seems necessary to appease borrowck.
-        let TryFindMatches { re, ref mut cache, ref mut caps, ref mut it } =
-            *self;
-        it.try_advance(|input| {
-            re.try_search(cache, input, caps)?;
-            Ok(caps.get_match())
-        })
-        .transpose()
+        let TryFindMatches {
+            re,
+            ref mut cache,
+            ref mut caps,
+            ref mut it,
+            ref mut first_search,
+        } = *self;
+        if *first_search {
+            if let Err(err) = cache.setup_search(re, it.input()) {
+                return Some(Err(err));
+            }
+            *first_search = false;
+            cache.match_all = true;
+        }
+        let result = it
+            .try_advance(|input| {
+                re.try_search(cache, input, caps)?;
+                Ok(caps.get_match())
+            })
+            .transpose();
+        if result.is_none() {
+            cache.match_all = false;
+        }
+        result
     }
 }
 
@@ -1695,6 +1713,7 @@ pub struct TryCapturesMatches<'r, 'c, 'h> {
     cache: &'c mut Cache,
     caps: Captures,
     it: iter::Searcher<'h>,
+    first_search: bool,
 }
 
 impl<'r, 'c, 'h> Iterator for TryCapturesMatches<'r, 'c, 'h> {
@@ -1703,17 +1722,43 @@ impl<'r, 'c, 'h> Iterator for TryCapturesMatches<'r, 'c, 'h> {
     #[inline]
     fn next(&mut self) -> Option<Result<Captures, MatchError>> {
         // Splitting 'self' apart seems necessary to appease borrowck.
-        let TryCapturesMatches { re, ref mut cache, ref mut caps, ref mut it } =
-            *self;
-        let _ = it
+        let TryCapturesMatches {
+            re,
+            ref mut cache,
+            ref mut caps,
+            ref mut it,
+            ref mut first_search,
+        } = *self;
+
+        if *first_search {
+            if let Err(err) = cache.setup_search(re, it.input()) {
+                return Some(Err(err));
+            }
+            *first_search = false;
+            cache.match_all = true;
+        }
+
+        match it
             .try_advance(|input| {
                 re.try_search(cache, input, caps)?;
                 Ok(caps.get_match())
             })
-            .transpose()?;
+            .transpose()
+        {
+            None => {
+                cache.match_all = false;
+                return None;
+            }
+            Some(Err(err)) => {
+                cache.match_all = false;
+                return Some(Err(err));
+            }
+            _ => {}
+        }
         if caps.is_match() {
             Some(Ok(caps.clone()))
         } else {
+            cache.match_all = false;
             None
         }
     }
@@ -1750,8 +1795,10 @@ pub struct Cache {
     in_la: bool,
     /// Indicates whether the backtracker is currently searching in reverse.
     reverse: bool,
-    /// Indicates whether the last checked look-around was matched
+    /// Indicates whether the last checked look-around was matched.
     last_la_result: bool,
+    /// Indicates whether the backtracker is currently doing a match-all.
+    match_all: bool,
 }
 
 impl Cache {
@@ -1772,6 +1819,7 @@ impl Cache {
             in_la: false,
             reverse: false,
             last_la_result: false,
+            match_all: false,
         }
     }
 
@@ -1846,8 +1894,10 @@ impl Cache {
         input: &Input<'_>,
     ) -> Result<(), MatchError> {
         self.stack.clear();
-        self.visited.setup_search(re, input)?;
-        self.la_result.setup_search(re, input)?;
+        if !self.match_all {
+            self.visited.setup_search(re, input)?;
+            self.la_result.setup_search(re, input)?;
+        }
         self.last_la_result = false;
         self.in_la = false;
         self.reverse = false;
