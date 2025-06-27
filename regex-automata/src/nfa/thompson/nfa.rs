@@ -1185,7 +1185,10 @@ impl NFA {
             + self.0.states.len() * size_of::<State>()
             + self.0.start_pattern.len() * size_of::<StateID>()
             + self.0.group_info.memory_usage()
-            + self.0.start_look_behind.len() * size_of::<StateID>()
+            + self.0.lookbehinds.iter()
+                .map(|b|
+                    b.try_fold(0, &|acc, _| Some(acc + 1)).unwrap()
+                ).sum::<usize>() * size_of::<LookBehindTree>()
             + self.0.memory_extra
     }
 }
@@ -1319,23 +1322,30 @@ impl LookBehindTree {
     }
 
     /// Calls `fun` on this look-behind tree and all of its children in pre-order.
+    /// `fun` should return `Some` if the traversal should continue and `None`
+    /// if it should stop.
+    ///
+    /// The return value is the fold of all `Some`s, or `None` if at any point `None`
+    /// was returned.
+    pub fn try_fold<A>(
+        &self,
+        acc: A,
+        fun: &impl Fn(A, &LookBehindTree) -> Option<A>,
+    ) -> Option<A> {
+        if let Some(acc) = fun(acc, self) {
+            self.children
+                .iter()
+                .try_fold(acc, |acc, child| child.try_fold(acc, fun))
+        } else {
+            None
+        }
+    }
+
+    /// Calls `fun` on this look-behind tree and all of its children in pre-order.
     /// `fun` should return `true` if the traversal should continue and `false`
     /// if it should stop.
     ///
     /// The return value indicates whether the traversal was at any point stopped.
-    pub fn preorder(&self, fun: &impl Fn(&LookBehindTree) -> bool) -> bool {
-        if !fun(self) {
-            return false;
-        }
-        for child in &self.children {
-            if !child.preorder(fun) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Like [`preorder`], but allows mutating the nodes.
     pub fn preorder_mut(
         &mut self,
         fun: &impl Fn(&mut LookBehindTree) -> bool,
@@ -1577,11 +1587,16 @@ impl fmt::Debug for Inner {
                 '^'
             } else if sid == self.start_unanchored {
                 '>'
-            } else if self
-                .lookbehinds
-                .iter()
-                .any(|i| !i.preorder(&|e| e.start_id() != sid))
-            {
+            } else if self.lookbehinds.iter().any(|i| {
+                i.try_fold((), &|_, e| {
+                    if e.start_id() == sid {
+                        None
+                    } else {
+                        Some(())
+                    }
+                })
+                .is_none()
+            }) {
                 '<'
             } else {
                 ' '
