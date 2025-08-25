@@ -5,7 +5,7 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use crate::{
     nfa::thompson::{
         error::BuildError,
-        nfa::{self, SparseTransitions, Transition, NFA},
+        nfa::{self, LookBehindTree, SparseTransitions, Transition, NFA},
     },
     util::{
         look::{Look, LookMatcher},
@@ -340,8 +340,9 @@ pub struct Builder {
     /// contains a single regex, then `start_pattern[0]` and `start_anchored`
     /// are always equivalent.
     start_pattern: Vec<StateID>,
-    /// The starting states for each individual look-behind sub-expression.
-    start_look_behind: Vec<StateID>,
+    /// A vector of look-behinds appearing in the regex. Order reflects the
+    /// order in the regex.
+    lookbehinds: Vec<LookBehindTree>,
     /// A map from pattern ID to capture group index to name. (If no name
     /// exists, then a None entry is present. Thus, all capturing groups are
     /// present in this mapping.)
@@ -387,7 +388,7 @@ impl Builder {
         self.pattern_id = None;
         self.states.clear();
         self.start_pattern.clear();
-        self.start_look_behind.clear();
+        self.lookbehinds.clear();
         self.captures.clear();
         self.memory_states = 0;
     }
@@ -452,7 +453,7 @@ impl Builder {
         remap.resize(self.states.len(), StateID::ZERO);
 
         nfa.set_starts(start_anchored, start_unanchored, &self.start_pattern);
-        nfa.set_look_behind_starts(self.start_look_behind.as_slice());
+        nfa.set_lookbehinds(self.lookbehinds.as_slice());
         nfa.set_captures(&self.captures).map_err(BuildError::captures)?;
         // The idea here is to convert our intermediate states to their final
         // form. The only real complexity here is the process of converting
@@ -711,9 +712,26 @@ impl Builder {
     }
 
     /// Adds the `start_id` to the set of starting states that is used when
-    /// running look-behind expressions.
-    pub fn start_look_behind(&mut self, start_id: StateID) {
-        self.start_look_behind.push(start_id);
+    /// running look-behind expressions. Additionally registers the furthest
+    /// offset (in bytes) from the start of the main regex this look-behind
+    /// starts.
+    ///
+    /// Look-behinds must be started in a depth-first pre-order fashion with
+    /// regards to the nesting of look-behinds. The nesting path is stored
+    /// as indices in `path`.
+    pub fn start_lookbehind(
+        &mut self,
+        start_id: StateID,
+        offset_from_start: Option<usize>,
+        path: &[usize],
+    ) {
+        let mut current = &mut self.lookbehinds;
+
+        for index in path {
+            current = current[*index].children_mut();
+        }
+
+        current.push(LookBehindTree::new(start_id, offset_from_start));
     }
 
     /// Add an "empty" NFA state.

@@ -7,6 +7,7 @@ resolving all spans of capturing groups that participate in a match.
 
 #[cfg(feature = "internal-instrument-pikevm")]
 use core::cell::RefCell;
+use core::cmp::Ordering;
 
 use alloc::{vec, vec::Vec};
 
@@ -278,7 +279,39 @@ impl Builder {
     /// given here is already built.
     pub fn build_from_nfa(&self, nfa: NFA) -> Result<PikeVM, BuildError> {
         nfa.look_set_any().available().map_err(BuildError::word)?;
-        Ok(PikeVM { config: self.config.clone(), nfa })
+
+        // We first fill the array depth-first reverse-pre-order.
+        let mut lookbehinds = vec![];
+
+        // Depth-first traversal stack. Offsets are initially zero.
+        let mut stack =
+            nfa.lookbehinds().iter().map(|e| (e, Some(0))).collect::<Vec<_>>();
+
+        while let Some((lb, offset)) = stack.pop() {
+            // To uphold the condition on `lookbehinds`, we must make sure that more nested look-behinds
+            // have an offset bigger or equal to those surrounding them.
+            let offset = match (offset, lb.offset_from_start()) {
+                (Some(o1), Some(o2)) => Some(usize::max(o1, o2)),
+                // A None subsumes the entire result.
+                (None, _) | (_, None) => None,
+            };
+
+            lookbehinds.push((lb.start_id(), offset));
+
+            stack.extend(lb.children().iter().map(|e| (e, offset)));
+        }
+
+        // We need to change the reverse-pre-order into a post-order (to store nested look-behinds before
+        // those surrounding them) and then use a **stable** sort on the offsets to uphold the conditions.
+        lookbehinds.reverse();
+        lookbehinds.sort_by(|a, b| match (a.1, b.1) {
+            (None, None) => Ordering::Equal,
+            (None, _) => Ordering::Less,
+            (_, None) => Ordering::Greater,
+            (Some(a), Some(b)) => b.cmp(&a),
+        });
+
+        Ok(PikeVM { config: self.config.clone(), nfa, lookbehinds })
     }
 
     /// Apply the given `PikeVM` configuration options to this builder.
@@ -387,6 +420,19 @@ impl Builder {
 pub struct PikeVM {
     config: Config,
     nfa: NFA,
+    /// Vector of look-behind start states together with the offset (in bytes)
+    /// of its start from the beginning of the main regex. An offset that is
+    /// `None` is unbounded.
+    ///
+    /// The order of the vector **must** uphold the following conditions:
+    /// 1. Elements with a `None` offset are ordered before other ones
+    /// 2. Elements with a larger offset are ordered before other ones
+    /// 3. A nested look-behind is ordered before its outer ones
+    ///
+    /// These conditions are crutial for starting the look-behind threads
+    /// in the correct haystack position. Offsets can be conservatively made
+    /// larger to uphold the previous conditions.
+    lookbehinds: Vec<(StateID, Option<usize>)>,
 }
 
 impl PikeVM {
@@ -1273,28 +1319,7 @@ impl PikeVM {
 
         if let Some(active) = match_lookaround {
             *curr_lookaround = active.clone();
-        } else if self.lookaround_count() > 0 {
-            // This initializes the look-behind threads from the start of the input
-            // Note: since capture groups are not allowed inside look-behinds,
-            // there won't be any Capture epsilon transitions and hence it is ok to
-            // use &mut [] for the slots parameter. We need to add the start states
-            // in reverse because more deeply nested look-behinds have a higher index
-            // but must be executed first, so that the result is available for the
-            // outer expression.
-            for look_behind_start in self.nfa.look_behind_starts().iter().rev()
-            {
-                self.epsilon_closure(
-                    stack,
-                    &mut [],
-                    curr_lookaround,
-                    lookaround,
-                    input,
-                    0,
-                    *look_behind_start,
-                );
-            }
-            // This is necessary for look-behinds to be able to match outside of the
-            // input span.
+        } else {
             self.fast_forward_lookbehinds(
                 Span { start: 0, end: input.start() },
                 input,
@@ -1345,18 +1370,16 @@ impl PikeVM {
                     match pre.find(input.haystack(), span) {
                         None => break,
                         Some(ref span) => {
-                            if self.lookaround_count() > 0 {
-                                // We are jumping ahead due to the pre-filter, thus we must bring
-                                // the look-behind threads to the new position.
-                                self.fast_forward_lookbehinds(
-                                    Span { start: at, end: span.start },
-                                    input,
-                                    stack,
-                                    curr_lookaround,
-                                    next_lookaround,
-                                    lookaround,
-                                );
-                            }
+                            // We are jumping ahead due to the pre-filter, thus we must bring
+                            // the look-behind threads to the new position.
+                            self.fast_forward_lookbehinds(
+                                Span { start: at, end: span.start },
+                                input,
+                                stack,
+                                curr_lookaround,
+                                next_lookaround,
+                                lookaround,
+                            );
                             at = span.start
                         }
                     }
@@ -1477,21 +1500,89 @@ impl PikeVM {
         next_lookaround: &mut ActiveStates,
         lookaround: &mut Vec<Option<NonMaxUsize>>,
     ) {
-        for lb_at in forward_span.start..forward_span.end {
-            self.nexts(
-                stack,
-                curr_lookaround,
-                next_lookaround,
-                lookaround,
-                input,
-                lb_at,
-                // Since capture groups are not allowed inside look-arounds,
-                // there won't be any Capture epsilon transitions and hence it is ok to
-                // use &mut [] for the slots parameter.
-                &mut [],
+        // Note: since capture groups are not allowed inside look-behinds,
+        // there won't be any Capture epsilon transitions and hence it is ok to
+        // use &mut [] for the slots parameter.
+
+        // We check the furthest offset from forward_span.end that we must start at.
+        // This greatest offset is stored with the first `self.lookbehinds` due to
+        // the requirements of that vector's order. If that largest offset expands
+        // before forward_span.start and that start is not the beginning of the
+        // input, we cannot use the optimization and fallback to fast-forward all
+        // look-behind threads together through the entire span. Otherwise, we clear
+        // the state of look-behinds and start them one by one joining each whenever
+        // their offset from forward_span.end is reached. Inner look-behind threads
+        // are started before their outer look-behind's due to the requirements of
+        // the self.lookbehinds vector.
+
+        if !self.lookbehinds.is_empty() {
+            let total_distance = forward_span.end - forward_span.start;
+
+            let start_offset = usize::min(
+                total_distance,
+                self.lookbehinds[0].1.unwrap_or(total_distance),
             );
-            core::mem::swap(curr_lookaround, next_lookaround);
-            next_lookaround.set.clear();
+
+            if forward_span.start == 0 || start_offset < total_distance {
+                curr_lookaround.set.clear();
+
+                let mut current_lookbehind = 0;
+
+                for offset in (0..=start_offset).rev() {
+                    let position = forward_span.end - offset;
+
+                    while let Some(start_id) = self
+                        .lookbehinds
+                        .get(current_lookbehind)
+                        .and_then(|e| {
+                            if e.1.unwrap_or(total_distance) >= offset {
+                                Some(e.0)
+                            } else {
+                                None
+                            }
+                        })
+                    {
+                        self.epsilon_closure(
+                            stack,
+                            &mut [],
+                            curr_lookaround,
+                            lookaround,
+                            input,
+                            position,
+                            start_id,
+                        );
+                        current_lookbehind += 1;
+                    }
+                    // We skip calling nexts when we are at forward_span.end.
+                    if offset != 0 {
+                        self.nexts(
+                            stack,
+                            curr_lookaround,
+                            next_lookaround,
+                            lookaround,
+                            input,
+                            position,
+                            &mut [],
+                        );
+                        core::mem::swap(curr_lookaround, next_lookaround);
+                        next_lookaround.set.clear();
+                    }
+                }
+            } else {
+                for position in forward_span.start..forward_span.end {
+                    self.nexts(
+                        stack,
+                        curr_lookaround,
+                        next_lookaround,
+                        lookaround,
+                        input,
+                        position,
+                        &mut [],
+                    );
+                    core::mem::swap(curr_lookaround, next_lookaround);
+                    next_lookaround.set.clear();
+                }
+            }
         }
     }
 
@@ -1552,17 +1643,6 @@ impl PikeVM {
             match_lookaround: _,
         } = cache;
 
-        for look_behind_start in self.nfa.look_behind_starts().iter().rev() {
-            self.epsilon_closure(
-                stack,
-                &mut [],
-                curr_lookaround,
-                lookaround,
-                input,
-                0,
-                *look_behind_start,
-            );
-        }
         self.fast_forward_lookbehinds(
             Span { start: 0, end: input.start() },
             input,
@@ -1571,6 +1651,7 @@ impl PikeVM {
             next_lookaround,
             lookaround,
         );
+
         for at in input.start()..=input.end() {
             let any_matches = !patset.is_empty();
             if curr.set.is_empty() {

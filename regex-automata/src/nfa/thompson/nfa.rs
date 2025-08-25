@@ -1108,8 +1108,8 @@ impl NFA {
 
     /// Returns the starting states for initializing look-behind evaluation.
     #[inline]
-    pub fn look_behind_starts(&self) -> &Vec<StateID> {
-        &self.0.start_look_behind
+    pub fn lookbehinds(&self) -> &[LookBehindTree] {
+        &self.0.lookbehinds
     }
 
     // FIXME: The `look_set_prefix_all` computation was not correct, and it
@@ -1185,7 +1185,10 @@ impl NFA {
             + self.0.states.len() * size_of::<State>()
             + self.0.start_pattern.len() * size_of::<StateID>()
             + self.0.group_info.memory_usage()
-            + self.0.start_look_behind.len() * size_of::<StateID>()
+            + self.0.lookbehinds.iter()
+                .map(|b|
+                    b.try_fold(0, &|acc, _| Some(acc + 1)).unwrap()
+                ).sum::<usize>() * size_of::<LookBehindTree>()
             + self.0.memory_extra
     }
 }
@@ -1277,13 +1280,90 @@ pub(super) struct Inner {
     /// This is needed to initialize the table for storing the result of
     /// look-around evaluation.
     lookaround_count: usize,
-    /// Contains the start state for each of the look-behind subexpressions.
-    start_look_behind: Vec<StateID>,
+    /// A vector of look-behinds appearing in the regex. Order reflects the
+    /// order in the regex.
+    lookbehinds: Vec<LookBehindTree>,
     /// Heap memory used indirectly by NFA states and other things (like the
     /// various capturing group representations above). Since each state
     /// might use a different amount of heap, we need to keep track of this
     /// incrementally.
     memory_extra: usize,
+}
+
+/// Information about a look-behinds needed for execution. It preserves the
+/// nesting structure of look-behinds.
+#[derive(Clone, Debug)]
+pub struct LookBehindTree {
+    start_id: StateID,
+    offset_from_start: Option<usize>,
+    children: Vec<LookBehindTree>,
+}
+
+impl LookBehindTree {
+    pub fn new(start_id: StateID, offset_from_start: Option<usize>) -> Self {
+        Self { start_id, offset_from_start, children: Vec::new() }
+    }
+
+    /// The id of the start state of the look-behind subexpression.
+    pub fn start_id(&self) -> StateID {
+        self.start_id
+    }
+
+    /// The offset (in bytes) from the beginning of the main regex that a
+    /// look-behind starts at. If `None`, the offset is unbounded.
+    pub fn offset_from_start(&self) -> Option<usize> {
+        self.offset_from_start
+    }
+
+    /// The look-behinds this look-behind contains. Order reflects the order
+    /// in the regex.
+    pub fn children(&self) -> &[LookBehindTree] {
+        &self.children
+    }
+
+    /// Calls `fun` on this look-behind tree and all of its children in pre-order.
+    /// `fun` should return `Some` if the traversal should continue and `None`
+    /// if it should stop.
+    ///
+    /// The return value is the fold of all `Some`s, or `None` if at any point `None`
+    /// was returned.
+    pub fn try_fold<A>(
+        &self,
+        acc: A,
+        fun: &impl Fn(A, &LookBehindTree) -> Option<A>,
+    ) -> Option<A> {
+        if let Some(acc) = fun(acc, self) {
+            self.children
+                .iter()
+                .try_fold(acc, |acc, child| child.try_fold(acc, fun))
+        } else {
+            None
+        }
+    }
+
+    /// Calls `fun` on this look-behind tree and all of its children in pre-order.
+    /// `fun` should return `true` if the traversal should continue and `false`
+    /// if it should stop.
+    ///
+    /// The return value indicates whether the traversal was at any point stopped.
+    pub fn preorder_mut(
+        &mut self,
+        fun: &impl Fn(&mut LookBehindTree) -> bool,
+    ) -> bool {
+        if !fun(self) {
+            return false;
+        }
+        for child in &mut self.children {
+            if !child.preorder_mut(fun) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn children_mut(&mut self) -> &mut Vec<LookBehindTree> {
+        &mut self.children
+    }
 }
 
 impl Inner {
@@ -1428,11 +1508,12 @@ impl Inner {
         self.start_pattern = start_pattern.to_vec();
     }
 
-    pub(super) fn set_look_behind_starts(
-        &mut self,
-        look_behind_starts: &[StateID],
-    ) {
-        self.start_look_behind = look_behind_starts.to_vec();
+    /// Sets the look-behind information of this NFA.
+    ///
+    /// The slice must be in a depth-first pre-order with regards to the
+    /// nesting of look-behinds.
+    pub(super) fn set_lookbehinds(&mut self, lookbehinds: &[LookBehindTree]) {
+        self.lookbehinds = lookbehinds.to_vec();
     }
 
     /// Sets the UTF-8 mode of this NFA.
@@ -1488,8 +1569,12 @@ impl Inner {
         for id in self.start_pattern.iter_mut() {
             *id = old_to_new[*id];
         }
-        for id in self.start_look_behind.iter_mut() {
-            *id = old_to_new[*id];
+
+        for lbs in self.lookbehinds.iter_mut() {
+            lbs.preorder_mut(&|e| {
+                e.start_id = old_to_new[e.start_id];
+                true
+            });
         }
     }
 }
@@ -1502,7 +1587,16 @@ impl fmt::Debug for Inner {
                 '^'
             } else if sid == self.start_unanchored {
                 '>'
-            } else if self.start_look_behind.contains(&sid) {
+            } else if self.lookbehinds.iter().any(|i| {
+                i.try_fold((), &|_, e| {
+                    if e.start_id() == sid {
+                        None
+                    } else {
+                        Some(())
+                    }
+                })
+                .is_none()
+            }) {
                 '<'
             } else {
                 ' '
