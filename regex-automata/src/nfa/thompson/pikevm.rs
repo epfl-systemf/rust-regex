@@ -70,7 +70,7 @@ pub struct Config {
 }
 
 /// The strategy for using a prefilter during PikeVM execution.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PrefilterStrategy {
     /// Use the prefilter only at the start of the search.
     Once,
@@ -1280,6 +1280,16 @@ impl PikeVM {
             Some(config) => config,
         };
 
+        #[derive(Copy, Clone)]
+        enum NextMatchingPrefix {
+            At(usize),
+            Nowhere,
+        }
+
+        let pre_strategy =
+            self.config.get_prefilter_strategy().unwrap_or_default();
+        let mut next_matching_prefix = None;
+
         let pre =
             if anchored { None } else { self.get_config().get_prefilter() };
         let Cache { ref mut stack, ref mut curr, ref mut next } = cache;
@@ -1297,6 +1307,25 @@ impl PikeVM {
         // match state.)
         let mut at = input.start();
         while at <= input.end() {
+            if pre_strategy == PrefilterStrategy::OneAhead {
+                if let Some(pre) = pre {
+                    match next_matching_prefix {
+                        Some(NextMatchingPrefix::Nowhere) => {}
+                        Some(NextMatchingPrefix::At(pos)) if pos >= at => {}
+                        Some(NextMatchingPrefix::At(_)) | None => {
+                            let span = Span::from(at..input.end());
+                            next_matching_prefix =
+                                Some(match pre.find(input.haystack(), span) {
+                                    None => NextMatchingPrefix::Nowhere,
+                                    Some(ref span) => {
+                                        NextMatchingPrefix::At(span.start)
+                                    }
+                                });
+                        }
+                    }
+                }
+            }
+
             // If we have no states left to visit, then there are some cases
             // where we know we can quit early or even skip ahead.
             if curr.set.is_empty() {
@@ -1319,13 +1348,50 @@ impl PikeVM {
                 // ahead until we find something that we know might advance us
                 // forward.
                 if let Some(pre) = pre {
-                    let span = Span::from(at..input.end());
-                    match pre.find(input.haystack(), span) {
-                        None => break,
-                        Some(ref span) => at = span.start,
+                    match pre_strategy {
+                        PrefilterStrategy::Once => {
+                            if at == input.start() {
+                                let span = Span::from(at..input.end());
+                                match pre.find(input.haystack(), span) {
+                                    None => break,
+                                    Some(ref span) => {
+                                        at = span.start;
+                                    }
+                                }
+                            }
+                        }
+                        PrefilterStrategy::OnEmptyStates => {
+                            let span = Span::from(at..input.end());
+                            match pre.find(input.haystack(), span) {
+                                None => break,
+                                Some(ref span) => {
+                                    at = span.start;
+                                }
+                            }
+                        }
+                        PrefilterStrategy::OneAhead => {
+                            let next_pos = next_matching_prefix.expect("in OneAhead strategy the next matching should be Some");
+
+                            match next_pos {
+                                NextMatchingPrefix::Nowhere => break,
+                                NextMatchingPrefix::At(pos) => at = pos,
+                            }
+                        }
                     }
                 }
             }
+
+            let match_can_start_here = {
+                if pre_strategy == PrefilterStrategy::OneAhead {
+                    if let Some(next_matching_prefix) = next_matching_prefix {
+                        matches!(next_matching_prefix, NextMatchingPrefix::At(pos) if pos == at)
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            };
             // Instead of using the NFA's unanchored start state, we actually
             // always use its anchored starting state. As a result, when doing
             // an unanchored search, we need to simulate our own '(?s-u:.)*?'
@@ -1374,6 +1440,7 @@ impl PikeVM {
             // an anchored search.
             if (hm.is_none() || allmatches)
                 && (!anchored || at == input.start())
+                && match_can_start_here
             {
                 // Since we are adding to the 'curr' active states and since
                 // this is for the start ID, we use a slots slice that is
